@@ -152,7 +152,7 @@ One group per entry of `network.gateways`; `<name>` is the entry's name. No entr
 
 | Key | Type | Default | Allowed | Description |
 | --- | --- | --- | --- | --- |
-| `device.profile` | text | `"random"` |  | Device model an Android reports: a preset name (see `sf device profiles`), `random`, or `none` to keep the image's own identity. |
+| `device.profile` | text | `"random"` |  | Device model an Android reports: a preset name (the Create form in the panel lists them), `random`, or `none` to keep the image's own identity. |
 | `device.randomize_android_id` | true / false | `true` |  | Give each new Android its own random android_id. |
 | `device.locale` | text | `"en-US"` |  | System language. |
 | `device.timezone` | text | `""` |  | Time zone as an Olson name, e.g. Europe/Berlin. Empty = the host's zone. |

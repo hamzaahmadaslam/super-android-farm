@@ -452,7 +452,9 @@ def check_ram(c: Ctx) -> Check:
               f"in {est['mode']} mode)")
     need = c.config.resources.memory_mb + c.config.performance.reserve_host_mb // 2
     if total < need:
-        return Check("mem.ram", "Memory", FAIL, detail, f"At least {need // 1024 + 1} GB of RAM is needed for one Android.")
+        return Check("mem.ram", "Memory", FAIL, detail,
+                     f"At least {need} MB ({-(-need // 1024)} GB) of RAM is needed for one Android: its limit "
+                     "(resources.memory_mb) plus half of performance.reserve_host_mb.")
     if total < 8192:
         return Check("mem.ram", "Memory", WARN, detail, "Expect a few Androids at most; see `sf host capacity`.")
     return Check("mem.ram", "Memory", OK, detail)
@@ -751,13 +753,40 @@ def check_adb(c: Ctx) -> Check:
     return _tool_check(c, "tools.adb", "adb", "adb", ["adb", "version"], "adb")
 
 
+SCRCPY_OLD = ("This distribution's scrcpy package is older than that. Use the upstream build: download "
+              "scrcpy-linux-x86_64-*.tar.gz from https://github.com/Genymobile/scrcpy/releases, unpack "
+              "it and put its folder on PATH ahead of the packaged one.")      # seen on Ubuntu 24.04 (scrcpy 1.25)
+
+
 def check_scrcpy(c: Ctx) -> Check:
-    return _tool_check(c, "tools.scrcpy", "scrcpy", "scrcpy", ["scrcpy", "--version"], "scrcpy", (2, 1),
-                       "audio capture and listening to a device need scrcpy 2.1 or newer", required=False,
-                       # Seen on Ubuntu 24.04, whose package is scrcpy 1.25.
-                       newer="This distribution's scrcpy package is older than that. Use the upstream build: download "
-                             "scrcpy-linux-x86_64-*.tar.gz from https://github.com/Genymobile/scrcpy/releases, unpack "
-                             "it and put its folder on PATH ahead of the packaged one.")
+    """What each feature that uses scrcpy needs, as the code enforces it: native windows
+    (stream/scrcpy.py) and listening (media/audio.py) only need a working `scrcpy`; the version
+    just picks option names for windows. The H.264 live view (stream/h264.py) has a range."""
+    from ..stream import h264
+    title = "scrcpy"
+    if not c.which("scrcpy"):
+        return Check("tools.scrcpy", title, WARN,
+                     "`scrcpy` is not on PATH: no native windows, no listening, no H.264 live view",
+                     c.distro.install_command("scrcpy"))
+    r = c.tool(["scrcpy", "--version"], timeout=10)
+    text = (r.stdout + r.stderr) if r else ""
+    line = next((ln.strip() for ln in text.splitlines() if re.search(r"\d+\.\d+", ln)), "")
+    v = _version(line)
+    if not v:
+        return Check("tools.scrcpy", title, OK, line[:80] or "installed")
+    low, high = ".".join(map(str, h264.MIN_VERSION)), h264.MAX_MAJOR
+    tested = ", ".join(f"{a}.{b}.x" for a, b in h264.VERIFIED)
+    if v < h264.MIN_VERSION or v[0] > high:
+        live, ok = f"live H.264 view not supported (needs {low} up to {high}.x)", False
+    elif v[:2] in h264.VERIFIED:
+        live, ok = "live H.264 view supported", True
+    else:
+        live, ok = f"live H.264 view untested (tested: {tested}; stream.h264 `on` uses it anyway)", True
+    detail = f"{line[:60]}: windows ok; {live}; listening ok (no version check)"
+    if ok:
+        return Check("tools.scrcpy", title, OK, detail)
+    return Check("tools.scrcpy", title, WARN, detail,
+                 SCRCPY_OLD if v < h264.MIN_VERSION else "install a scrcpy release the H.264 view supports")
 
 
 def check_ffmpeg(c: Ctx) -> Check:

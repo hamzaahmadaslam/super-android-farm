@@ -8,7 +8,7 @@ Commands that start work, such as `start`, `app install` and `backup create`, fo
 
 ## 1. Check the host
 
-Panel: open the Dashboard. The first-run checklist reads the real state of the machine and shows the exact fix for each failing host check. System in the sidebar lists every check.
+Panel: open the Dashboard. The first-run checklist reads the state of the machine and shows the exact fix for each failing host check. System in the sidebar lists every check.
 
 CLI:
 

@@ -60,7 +60,7 @@ Settings under `android`, `resources`, `gpu`, `network` and `device` reach an An
 | Doctor: `inotify limits` or `ARP / neighbour table size` warns | | `sf host apply` |
 | Doctor: `Farm home filesystem` fails with "no Unix permissions" | The farm home is on NTFS, exFAT or FAT. | `export SUPERFARM_HOME=~/.local/share/superfarm` |
 | Doctor: `Host setup applied` warns | Host setup has not run, or only partly. | `sf host apply` |
-| Doctor: `scrcpy` warns about an old version | `scrcpy --version` | Download the upstream build from <https://github.com/Genymobile/scrcpy/releases> and put its folder first on your `PATH`. |
+| Doctor: `scrcpy` warns that the live H.264 view is not supported | `scrcpy --version`. Windows and listening need no particular version; the H.264 view needs 2.1 up to 3.x. | Download the upstream build from <https://github.com/Genymobile/scrcpy/releases> and put its folder first on your `PATH`. |
 | After a reboot, Androids no longer start | The boot unit did not run. | `systemctl status superfarm-host.service`<br>`sf host apply --boot` |
 
 `sf host apply`, the boot unit and `sf service install` have not been run for real during testing; see [VERIFICATION.md](VERIFICATION.md). If one of them fails, `sf host apply --dry-run` prints every command so that you can run the failing one by hand.
@@ -101,7 +101,7 @@ Only Android 13 has been booted in testing. An Android of another version that d
 | Every NVIDIA Android lost its picture at once | Is the relay still running? `pgrep -x virgl_test_serv` | `sf restart <selector of the NVIDIA Androids>` |
 | NVIDIA Androids lose their picture when you log out | The relay runs in your user session. | `loginctl enable-linger "$USER"` |
 | The screen is black but the Android is `booted` | `sf screenshot N -o shot.png`<br>`sf logs N --logcat` | `sf gpu set N software`, then `sf restart N`, to see whether the GPU mode is the cause |
-| CPU use is very high | `sf gpu ls` shows `software` in use. Software rendering costs about five times the CPU of a GPU mode. | `sf gpu set all igpu`, then `sf restart all` |
+| CPU use is high | `sf gpu ls` shows `software` in use. Software rendering costs about five times the CPU of a GPU mode. | `sf gpu set all igpu`, then `sf restart all` |
 
 Never restart the relay while NVIDIA Androids run. Each of them holds connections to it and loses its graphics until it is restarted.
 
@@ -183,7 +183,7 @@ The panel has been tested in Chrome only.
 | `could not read the screen: ...` | The screen never stops moving (video, animation). | `.venv/bin/python -m pip install -e ".[u2]"`<br>`sf config set automation.hierarchy_reader u2` |
 | A trained program stops at its first tap | The app was not on its first screen. | `sf app stop <selector> <package>`, then run it again |
 | A step does not find its element | `sf auto run <kind> <name> N --dry-run` finds every element and taps nothing. | Record the task again and retrain: `sf auto train <dataset>` |
-| Training left steps out | The warnings in the training task say which and why. | Record more runs of the same task; three or more give a real consensus. |
+| Training left steps out | The warnings in the training task say which and why. | Record more runs of the same task; three or more give a consensus. |
 | A flow is refused when saved | | `sf auto flows validate <file>` prints the error with its position. |
 | A flow refuses to type a text | Flows type printable ASCII only. | Type other text from the panel's live view, which pastes through the clipboard. |
 | A value named like a password is refused | Secret-looking names are never stored. | Pass it for one run: `sf auto run flow <name> N --secret password` |

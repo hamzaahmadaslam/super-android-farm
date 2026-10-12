@@ -102,7 +102,7 @@ What it guarantees, when it is on and the mode is `vpn` or `gateway`:
 - The default-deny firewall for IPv4 and IPv6 is loaded before anything else runs in the sidecar, so it holds from the first packet, before the VPN connects.
 - Names of the VPN servers are resolved once, while only DNS to your configured resolvers is open. The resulting addresses are pinned in the firewall, the routes and `/etc/hosts`, then DNS on the uplink is closed again. Afterwards the only things allowed out of the uplink interface are the VPN transport to those pinned addresses and the answers of an ADB session.
 - The sidecar never exits because the tunnel failed. It restarts the tunnel in place behind the firewall that stays up. The Android shares the sidecar's namespace, and a restarted sidecar would leave it attached to a dead one.
-- The firewall is checked, not only set. The status shows whether the live rules really have the property above, and a missing or wiped rule set is detected and restored.
+- The firewall is checked, not only set. The status shows whether the live rules have the property above, and a missing or wiped rule set is detected and restored.
 - IPv6 is dropped by default. Most VPN profiles carry no IPv6, so it would bypass the tunnel.
 - With `none` mode, outbound is dropped whatever the kill switch setting says.
 

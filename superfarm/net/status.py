@@ -25,7 +25,7 @@ PROBLEM_STATES = ("auth_failed", "tls_error", "dns_error", "unreachable", "confi
 
 _FIXES = {
     "auth_failed": "The VPN server rejected the username or password. Store the right ones with "
-                   "`sf vpn credentials set <name>` and restart the Android.",
+                   "`sf vpn credentials <name>` and restart the Android.",
     "tls_error": "The secure handshake with the VPN server failed (wrong or expired certificate/key in the "
                  "profile, or something on the path blocks it). Try another profile or re-download this one.",
     "dns_error": "The VPN server's name could not be resolved. Check network.dns and the host's connection.",

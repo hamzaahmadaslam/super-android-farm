@@ -62,7 +62,7 @@ sf auto programs
 
 In the panel, press Train on a dataset, then see the result under Programs, where Steps shows the outline and flags steps that can be found only by position.
 
-Read the warnings training prints. They are the product: a step that silently vanished is how a program works in the test and fails on the fleet. They say, among others:
+Read the warnings training prints: a step that silently vanished is how a program works in the test and fails on the fleet. The warnings say, among others:
 
 - the program was built from a single recording, so nothing could be cross-checked;
 - with fewer than three recordings, one bad capture can outvote the rest;

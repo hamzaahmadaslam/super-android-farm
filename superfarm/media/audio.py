@@ -171,7 +171,7 @@ class Listener:
         instance_id = check_id(id)
         scrcpy = which("scrcpy")
         if not scrcpy:
-            raise RuntimeError("scrcpy is not installed. Install scrcpy 2.5 or newer (the `scrcpy` package, "
+            raise RuntimeError("scrcpy is not installed. Install scrcpy (the `scrcpy` package, "
                                "or https://github.com/Genymobile/scrcpy) and try again.")
         adb = self.mgr.adb(instance_id)
         if not adb.connect(attempts=2):

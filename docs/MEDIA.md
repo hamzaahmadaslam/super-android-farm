@@ -109,7 +109,7 @@ sf listen          # show which Android is being listened to
 sf listen off
 ```
 
-In the panel it is on the Media page. A second scrcpy without window, picture or control carries only that Android's sound, uncompressed, through the audio session of the user the daemon runs as. Only one Android is heard at a time, because two streams on one pair of speakers are useless, and playback is disabled inside the listened Android. It needs scrcpy 2.1 or newer on the daemon's machine ([Install](INSTALL.md#scrcpy)) and a daemon that runs inside your desktop session, which is why it runs as a user service.
+In the panel it is on the Media page. A second scrcpy without window, picture or control carries only that Android's sound, uncompressed, through the audio session of the user the daemon runs as. Only one Android is heard at a time, because two streams on one pair of speakers cannot be told apart, and playback is disabled inside the listened Android. It needs a working `scrcpy` on the daemon's machine ([Install](INSTALL.md#scrcpy)); the code checks no minimum version for it and a daemon that runs inside your desktop session, which is why it runs as a user service.
 
 `audio.listen_buffer_ms` (default 200) is the buffer: larger means fewer stutters and more delay. `audio.listen_volume` (default 15 of 15) is the media volume set while listening, because captured sound passes through a device with its own volume. Listening start and stop were verified with a real scrcpy.
 
@@ -121,9 +121,9 @@ sf window grid 1-12
 sf window close all
 ```
 
-Each window is its own scrcpy process on the desktop the daemon runs on, which is the smoothest way to watch and drive one Android. `grid` tiles windows to fill the screen, and overlaps them when there are too many to show side by side at a usable size. `close all` closes every window, including those of deleted Androids.
+Each window is its own scrcpy process on the desktop the daemon runs on, so the picture and input do not pass through the panel. `grid` tiles windows to fill the screen, and overlaps them when there are too many to show side by side at a usable size. `close all` closes every window, including those of deleted Androids.
 
-Windows need scrcpy and a display. The daemon has to start inside your login session, or as your user service after the desktop published its display ([Install](INSTALL.md#8-start-the-daemon)). When it has no display, `sf window` says so; the panel and every Android are unaffected. Appearance is set by `stream.scrcpy_bitrate` (`2M`), `stream.scrcpy_max_size` (720; 0 is full size), `stream.scrcpy_max_fps` (20) and `stream.scrcpy_extra_args`.
+Windows need a working `scrcpy` (no minimum version is checked; older ones get older option names) and a display. The daemon has to start inside your login session, or as your user service after the desktop published its display ([Install](INSTALL.md#8-start-the-daemon)). When it has no display, `sf window` says so; the panel and every Android are unaffected. Appearance is set by `stream.scrcpy_bitrate` (`2M`), `stream.scrcpy_max_size` (720; 0 is full size), `stream.scrcpy_max_fps` (20) and `stream.scrcpy_extra_args`.
 
 ## Next
 

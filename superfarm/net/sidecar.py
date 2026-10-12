@@ -80,7 +80,7 @@ def ensure_image(docker: Docker, *, rebuild: bool = False) -> str:
             tail = " | ".join((e.stderr or e.stdout or "").strip().splitlines()[-3:])
             raise RuntimeError(
                 f"building the network sidecar image {ref} failed. It downloads Alpine packages, so the host "
-                f"needs internet access for this one step; then run `sf net build` again. Docker said: {tail[:400]}"
+                f"needs internet access for this one step; then start again. Docker said: {tail[:400]}"
             ) from e
         docker.run(["tag", ref, f"{NET_IMAGE}:latest"], timeout=30, check=False)
     return ref
@@ -159,12 +159,12 @@ def tunnel_parts(config: Config, paths: Paths, profile_name: str, runtime_dir: P
     if profile.provider == "openvpn":
         if not Path(TUN_DEVICE).exists():
             raise ValueError(f"{TUN_DEVICE} does not exist on this host. Load the tunnel module (`sudo modprobe tun`) "
-                             "or run `sf host setup`, then start again")
+                             "or run `sf host apply`, then start again")
         args += ["--device", TUN_DEVICE]
         if profile.needs_credentials:
             if not vpn.has_credentials(paths, credentials):
                 raise ValueError(f"VPN profile {profile_name!r} asks for a username and password, and none is stored "
-                                 f"under the name {credentials!r}. Store them with `sf vpn credentials set {credentials}`")
+                                 f"under the name {credentials!r}. Store them with `sf vpn credentials {credentials}`")
             args += bind_mount(vpn.credentials_path(paths, credentials), "/sf/secrets/auth")
         v = config.network.vpn
         env.update(SF_VPN_PING=str(v.ping_seconds), SF_VPN_PING_RESTART=str(v.ping_restart_seconds),
@@ -187,7 +187,7 @@ def select_profile(r: Resolved, config: Config, paths: Paths, store: Store, dock
         if r.vpn_profile:
             name = r.vpn_profile
             if name not in vpn.profile_names(paths):
-                raise ValueError(f"instance {r.id}: pinned VPN profile {name!r} does not exist; see `sf vpn list`")
+                raise ValueError(f"instance {r.id}: pinned VPN profile {name!r} does not exist; see `sf vpn profiles`")
         else:
             v = config.network.vpn
             assigned = {}

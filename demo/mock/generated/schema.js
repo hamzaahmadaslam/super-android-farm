@@ -571,7 +571,7 @@ export default {
    "properties": {
     "profile": {
      "default": "random",
-     "description": "Device model an Android reports: a preset name (see `sf device profiles`), `random`, or `none` to keep the image's own identity.",
+     "description": "Device model an Android reports: a preset name (the Create form in the panel lists them), `random`, or `none` to keep the image's own identity.",
      "title": "Profile",
      "type": "string"
     },

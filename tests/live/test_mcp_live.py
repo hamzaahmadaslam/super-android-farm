@@ -240,7 +240,7 @@ def test_protocol_and_the_operators_yes_or_no(farm, mode):
             if mode == "legacy":
                 assert client.server_info.name == "superfarm"
             tools = {t.name: t for t in (await client.list_tools()).tools}
-            assert len(tools) == 36 and "run_shell" not in tools             # denied by default
+            assert len(tools) == 38 and "run_shell" not in tools             # denied by default
             assert tools["list_androids"].annotations.read_only_hint is True
             assert tools["delete_androids"].annotations.destructive_hint is True
             assert tools["tap"].input_schema["required"] == ["selector", "x", "y"]
@@ -271,7 +271,7 @@ def test_protocol_and_the_operators_yes_or_no(farm, mode):
             began = time.monotonic()
             created = await call(client, "create_androids", {"count": 2, "name": "live", "tags": ["mcp"]})
             thread.join(10)
-            assert created.is_error is False and created.structured_content == {"ok": True, "created": [1, 2]}
+            assert created.is_error is False and created.structured_content == {"ok": True, "created": [1, 2], "start_with": {"tool": "start_androids", "selector": "1-2"}}
             asked, decided = seen
             assert asked["summary"] == 'Create 2 new Androids (name="live", tags=["mcp"])'
             assert (asked["caller"], asked["tool"], asked["klass"], asked["state"]) == (CALLER, "create_androids", "change", "pending")
@@ -380,14 +380,14 @@ def test_streamable_http_with_the_bearer_token(farm):
             async with create_mcp_http_client(headers={"Authorization": f"Bearer {farm.token}"}) as http, \
                     Client(streamable_http_client(url, http_client=http), mode="legacy", client_info=CLIENT, cache=None) as client:
                 assert client.server_info.name == "superfarm"
-                assert len((await client.list_tools()).tools) == 36
+                assert len((await client.list_tools()).tools) == 38
                 status = await call(client, "farm_status")
                 assert status.is_error is False and status.structured_content["androids"]["total"] == 0
                 seen: list[dict] = []
                 thread = farm.answer("approve", seen)
                 created = await call(client, "create_androids", {"name": "over-http"})
                 thread.join(10)
-                assert created.structured_content == {"ok": True, "created": [1]} and seen[0]["caller"] == CALLER
+                assert created.structured_content == {"ok": True, "created": [1], "start_with": {"tool": "start_androids", "selector": "1"}} and seen[0]["caller"] == CALLER
 
         anyio.run(main)
         assert farm.api.delete("/api/instances/1").status_code == 200
@@ -408,7 +408,7 @@ def test_one_real_android_seen_and_driven_through_mcp(farm):
         async with stdio(farm) as client:
             # ---- create and start (both approved by the operator)
             created = await call(client, "create_androids", {"name": "pilot"})
-            assert created.structured_content == {"ok": True, "created": [1]}
+            assert created.structured_content == {"ok": True, "created": [1], "start_with": {"tool": "start_androids", "selector": "1"}}
             started = await finished(client, await call(client, "start_androids", {"selector": "1"}))
             assert started.is_error is False, text(started)
             assert started.structured_content["task"]["state"] == "done" and started.structured_content["task"]["ok"] == 1

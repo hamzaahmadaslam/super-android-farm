@@ -44,7 +44,7 @@ Android needs the kernel's binder driver. `sf doctor` prints what to do for your
 
 ### scrcpy is missing or too old. Is that a problem?
 
-Only for native windows, listening to an Android, and the H.264 live view. The panel's screenshot-based live view works without it. Debian 12 and Fedora have no package, and Ubuntu 24.04's is older than the 2.1 that the doctor wants. See [scrcpy](INSTALL.md#scrcpy).
+Only for native windows, listening to an Android, and the H.264 live view. The panel's screenshot-based live view works without it. Debian 12 and Fedora have no package, and Ubuntu 24.04's is older than the 2.1 that the H.264 view needs. See [scrcpy](INSTALL.md#scrcpy).
 
 ### How do I log in to the panel?
 

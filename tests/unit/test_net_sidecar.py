@@ -199,7 +199,7 @@ def test_vpn_start_problems_are_explained(farm):
     with pytest.raises(ValueError, match="pinned VPN profile 'zz.ovpn' does not exist"):
         args_for(farm, config, vpn_profile="zz.ovpn")
     vpn.delete_credentials(paths, "default")
-    with pytest.raises(ValueError, match="sf vpn credentials set default"):
+    with pytest.raises(ValueError, match="sf vpn credentials default"):
         args_for(farm, config)
 
 

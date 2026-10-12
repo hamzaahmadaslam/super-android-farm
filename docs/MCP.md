@@ -56,13 +56,17 @@ Settings that refine it (all under `ai`, see `docs/CONFIGURATION.md`):
 | `ai.max_screenshot_px` | 768 | Longest side of a screenshot given to an assistant. |
 | `ai.mcp.enabled` | on | Off: `sf mcp` refuses to start. |
 | `ai.mcp.http_port` | 7711 | Port of `sf mcp --http`. |
-| `ai.mcp.elicitation` | on | Also show the Yes/No in the assistant's own window when the client supports it. |
+| `ai.mcp.elicitation` | off | Also show the Yes/No in the assistant's own window when the client supports it. Off by default because a client may answer such a question by itself without showing it to anyone, and the decision is meant to be a person's. |
 
     sf config set ai.policy read-only
     sf config set ai.auto_approve tap,swipe,type_text,press_key
     sf mcp tools            every tool, its class, and what the current policy does with it
 
-A change takes effect at once, also for assistants that are already connected.
+`sf config set` writes `config.yaml` and says so; a running daemon reads that file at its next start
+(`sf service stop && sf service start`). A change made in the panel (Settings) or through
+`PATCH /api/config` is applied to the running daemon at once, also for assistants that are already
+connected, except for the few settings that need an Android restart or a daemon restart; the
+response names them.
 
 ## The operator's Yes or No
 
@@ -102,17 +106,20 @@ Details:
   or so), its request is withdrawn within a few seconds, so you are not approving an action
   whose result nobody would receive. Ask the assistant to try again when you are ready.
 - **The assistant's own prompt.** Some clients can ask their user a question on behalf of a
-  server (MCP "elicitation"). When yours can, the same Yes/No also appears there; the first
-  answer counts and is recorded as given through the assistant. A client is free to answer
-  such a question by itself without showing it to you. If you are not sure that yours shows
-  it, set `ai.mcp.elicitation` to `false`: then only the panel and the terminal can answer.
+  server (MCP "elicitation"). With `ai.mcp.elicitation` set to `true` and such a client, the
+  same Yes/No also appears there; the first answer counts and is recorded as given through
+  the assistant. It is off by default: a client is free to answer such a question by itself
+  without showing it to you. Turn it on only if you are sure that yours shows it; otherwise
+  only the panel and the terminal can answer.
 
 ## Setup
 
 Requirements: the farm daemon is running (`sf serve` or `sf service start`), and the MCP
-extra is installed in the same Python environment as Super Farm:
+extra is installed in the same Python environment as Super Farm. The installer creates the
+environment in `.venv` inside the checkout and installs the project without extras
+(see [INSTALL.md](INSTALL.md)), so add the extra from the checkout:
 
-    pip install "superfarm[mcp]"
+    .venv/bin/python -m pip install -e ".[mcp]"
 
 ### A client that launches a command (stdio)
 
@@ -227,7 +234,7 @@ And three prompts, which clients show as ready-made commands:
 
 | What you see | What to do |
 | --- | --- |
-| `the MCP SDK is not installed` | `pip install "superfarm[mcp]"` in the environment `sf` runs from. |
+| `the MCP SDK is not installed` | From the checkout: `.venv/bin/python -m pip install -e ".[mcp]"` (the environment `sf` runs from). |
 | The client shows no tools, or every call says the daemon is not running | Start the daemon: `sf serve` or `sf service start`. `sf mcp` does not start it. |
 | `the daemon rejected the API token` | The client starts `sf mcp` as another user, or with another farm home. Use the snippet from `sf mcp config` unchanged; it names the home. |
 | `MCP access is switched off` | `sf config set ai.mcp.enabled true` |

@@ -25,10 +25,10 @@ Everything that was run live (Androids booting, GPU modes, networking, backups, 
 | OS | Linux with systemd, one of the families in the [distribution sections](#distribution-notes). |
 | Kernel | 5.0 or newer (the doctor fails below that). The Android images are tested on 5.10 and newer. The kernel must provide binder (see [Binder](#binder)), cgroup v2 and the usual container networking modules. |
 | Docker | Docker Engine running, and your user allowed to use it. Docker 29 is what was tested. |
-| RAM | The doctor fails below `resources.memory_mb` plus half of `performance.reserve_host_mb` (3072 MB with the defaults) and warns below 8 GB. Plan on 0.9 to 1.1 GB per running Android in use. See [Scaling](SCALING.md). |
+| RAM | The doctor fails below `resources.memory_mb` plus half of `performance.reserve_host_mb` (3072 MB, which is 3 GB, with the defaults) and warns below 8 GB. Plan on 0.9 to 1.1 GB per running Android in use. See [Scaling](SCALING.md). |
 | Disk | The doctor warns below 5 GB free for the farm home and 20 GB for Docker's data. Each Android needs 2 to 6 GB once apps are installed. |
 | Python | 3.10 or newer with the `venv` module. The installer installs it when missing. |
-| Other tools | `adb`, `ffmpeg`, `curl`, `kmod`, `ip` are required. `scrcpy` (2.1 or newer), `zstd`, `pigz`, `patchelf`, `git` and `lspci` are optional. The installer installs what it can. |
+| Other tools | `adb`, `ffmpeg`, `curl`, `kmod`, `ip` are required. `scrcpy`, `zstd`, `pigz`, `patchelf`, `git` and `lspci` are optional. The installer installs what it can. |
 
 Put the farm home and Docker's data on a filesystem that keeps Unix permissions and extended attributes (ext4, xfs, btrfs). The doctor fails or warns for NTFS, exFAT, FAT, and network filesystems, because the farm home holds 0600 secrets and sockets and Android's `/data` holds numeric owners and SELinux labels.
 
@@ -92,6 +92,8 @@ The installer does five things:
 
 Options: `--dry-run`, `--home DIR` (farm home, default `~/.local/share/superfarm`), `--venv DIR`, `--no-host` (skip host setup and run it later with `sf host apply`), `--dev` (also install the test tools) and `--container-test` (for the distribution test only, never on a real machine). Paths for `--home` and `--venv` must not contain spaces, because systemd units cannot name them.
 
+The installer adds no optional extras. Add one later from the checkout, for example the MCP server (see [MCP.md](MCP.md)): `.venv/bin/python -m pip install -e ".[mcp]"`.
+
 ### 4. The one sudo step
 
 Host setup is the same code as `sf host apply`. It runs as root through `sudo`, with the fixed list of actions you saw in the dry run:
@@ -133,7 +135,7 @@ sf doctor
 
 The doctor runs 46 read-only checks (CPU, kernel, binder, Docker, kernel limits, memory, disk, GPUs, tools, ports, security settings) and prints a table. For every `fail` or `warn` it prints the exact fix for your distribution. It never changes anything and never needs root. The exit code is 1 when any check fails.
 
-Fix every `fail` before you go on. Warnings are worth reading; many are optional (for example scrcpy, compressed swap, a missing display for native windows). The same checks are in the panel under System, and [Troubleshooting](TROUBLESHOOTING.md) explains the common ones.
+Fix every `fail` before you go on. Read the warnings; many are optional (for example scrcpy, compressed swap, a missing display for native windows). The same checks are in the panel under System, and [Troubleshooting](TROUBLESHOOTING.md) explains the common ones.
 
 ### 8. Start the daemon
 
@@ -242,7 +244,7 @@ Binder was available on the Ubuntu 26.04 test machine and was not checked on any
 ### Ubuntu and Debian
 
 - Packages: `docker.io`, `adb`, `ffmpeg`, `scrcpy` where the release has it.
-- Debian 12 has no `scrcpy` package, and Ubuntu 24.04's package (1.25) is older than the 2.1 the doctor wants for audio and listening. See [scrcpy](#scrcpy).
+- Debian 12 has no `scrcpy` package, and Ubuntu 24.04's package (1.25) is older than the 2.1 that the H.264 live view needs. See [scrcpy](#scrcpy).
 - The `python3-venv` and `python3-dev` packages are installed together with Python, because Debian splits `venv` out.
 - AppArmor is active by default. The doctor notes that privileged Android containers run unconfined and the network sidecars run under `docker-default`.
 
@@ -265,7 +267,7 @@ Binder was available on the Ubuntu 26.04 test machine and was not checked on any
 
 ### scrcpy
 
-`scrcpy` powers native device windows, "listen to one Android", audio capture and the H.264 live view in the panel. It is optional: the panel's screenshot-based live view works without it. The doctor warns when the installed version is older than 2.1.
+`scrcpy` powers native device windows, "listen to one Android", audio capture and the H.264 live view in the panel. It is optional: the panel's screenshot-based live view works without it. The doctor reports per feature what the code enforces: native windows and listening need a working `scrcpy` and check no version; the H.264 live view needs 2.1 up to 3.x (tested: 3.3.x, other versions need `stream.h264` set to `on`). The doctor warns when the H.264 view cannot be used with the installed version.
 
 Where to get it when your distribution has none or an old one:
 

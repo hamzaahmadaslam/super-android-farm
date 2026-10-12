@@ -285,7 +285,8 @@ def test_low_limits_warn_with_exact_sysctl_commands(tmp_path):
 
 def test_memory_checks(tmp_path):
     root, paths = healthy(tmp_path, total_gb=2)
-    assert run(root, paths)["mem.ram"].status == "fail"
+    ram = run(root, paths)["mem.ram"]
+    assert ram.status == "fail" and "At least 3072 MB (3 GB) of RAM" in ram.fix      # the threshold, not one GB more
     root, paths = healthy(tmp_path / "b", total_gb=6)
     assert run(root, paths)["mem.ram"].status == "warn"
     root, paths = healthy(tmp_path / "c")
@@ -398,6 +399,20 @@ def test_missing_and_old_tools(tmp_path):
     # The packaged scrcpy is what is too old (Ubuntu 24.04 ships 1.25): installing it again fixes nothing.
     assert "upstream build" in old.fix and "apt-get" not in old.fix
     assert "1.0.41" in run(root, paths)["tools.adb"].detail
+
+
+@pytest.mark.parametrize("version, status, live", [
+    ("3.3.4", "ok", "live H.264 view supported"),
+    ("3.0.1", "ok", "live H.264 view untested"),
+    ("2.1", "ok", "live H.264 view untested"),
+    ("2.0.1", "warn", "live H.264 view not supported (needs 2.1 up to 3.x)"),
+    ("4.0", "warn", "live H.264 view not supported (needs 2.1 up to 3.x)"),
+])
+def test_scrcpy_is_reported_per_feature_as_the_code_enforces_it(tmp_path, version, status, live):
+    root, paths = healthy(tmp_path)
+    r = run(root, paths, runner=make_runner(tools={"scrcpy": f"scrcpy {version} <x>\n"}))["tools.scrcpy"]
+    assert r.status == status and live in r.detail
+    assert "windows ok" in r.detail and "listening ok (no version check)" in r.detail   # neither feature checks a version
 
 
 def test_exposure_warnings(tmp_path):

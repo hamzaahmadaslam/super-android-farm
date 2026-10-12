@@ -646,3 +646,10 @@ def test_pure_helpers_behave(tmp_path: Path):
     assert got["hash"] == [{"name": "android", "params": ["5", "apps"]}, {"name": "", "params": []},
                            {"name": "control", "params": ["1-3,7"]}]
     assert got["query"] == ["?a=1&d=x+y", "", ""]
+
+
+def test_the_assistant_page_never_draws_an_event_twice():
+    """Sending a message and the poll timer can both fetch "events after N" at the same
+    moment. The page must skip events it has already drawn, by their number."""
+    source = (WEB / "js" / "pages" / "assistant.js").read_text(encoding="utf-8")
+    assert "if (event.n <= last) continue;" in source

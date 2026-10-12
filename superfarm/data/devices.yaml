@@ -1,6 +1,6 @@
 # Device presets: what an Android reports about itself (Build.BRAND, Build.MODEL, ...).
 #
-# `sf device profiles` lists them; `device.profile` in config.yaml (or per instance) picks one,
+# The panel's Create form lists them; `device.profile` in config.yaml (or per instance) picks one,
 # `random` draws one per new Android, `none` keeps the image's own identity.
 #
 # Rules for this file

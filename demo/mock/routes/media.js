@@ -14,7 +14,7 @@ function availability() {
   const c = camera();
   const first = c.device_base + 1;
   const all = Array.from({ length: c.slots }, (_, index) => first + index);
-  const reasons = c.enabled ? [] : ['media.camera.enabled is off: set it to true in the farm’s config, then run `sudo sf host apply`.'];
+  const reasons = c.enabled ? [] : ['media.camera.enabled is off: set it to true in the farm’s config, then run `sf host apply`.'];
   return {
     enabled: c.enabled, ok: c.enabled, reasons, module: true,
     devices: { first, slots: c.slots, usable: c.enabled ? all : [], missing: c.enabled ? [] : all, foreign: [], no_access: [] },
@@ -33,7 +33,7 @@ function status() {
 }
 
 function ready() {
-  if (!camera().enabled) throw conflict('the virtual camera is switched off on this farm: set media.camera.enabled to true (Settings, Media), then run `sudo sf host apply`');
+  if (!camera().enabled) throw conflict('the virtual camera is switched off on this farm: set media.camera.enabled to true (Settings, Media), then run `sf host apply`');
 }
 
 route('GET', '/api/camera', () => ({ available: availability(), status: status() }));

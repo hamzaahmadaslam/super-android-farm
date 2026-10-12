@@ -31,9 +31,12 @@ from pathlib import Path
 
 import pytest
 import test_web_static as web
+from ai_fakes import Scripted, call, say
 from api_fakes import api
 from automation_fakes import FakeDevice, button, field, screen
 
+from superfarm.ai.assistant import Assistant
+from superfarm.ai.tools import ToolResult
 from superfarm.core import backup as backup_mod
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -210,8 +213,13 @@ COMPARED = [
     ("mcp info", "/api/mcp/info", "/api/mcp/info"),
     ("ai models", "/api/ai/models", "/api/ai/models"),
     ("ai conversations", "/api/ai/conversations", "/api/ai/conversations"),
+    ("ai conversation", "/api/ai/conversations/{conversation}", "/api/ai/conversations/{conversation}"),
     ("pilot sessions", "/api/ai/pilot/sessions", "/api/ai/pilot/sessions"),
+    ("pilot session", "/api/ai/pilot/sessions/{session}", "/api/ai/pilot/sessions/{session}"),
+    ("pilot summary", "/api/ai/pilot/pilot-form/summary", "/api/ai/pilot/pilot-form/summary"),
 ]
+# Addresses written with {conversation} or {session} in COMPARED: the real application and the mock each fill
+# them in with the id of the thing they made (see _fill_real and the setup in the `answers` fixture).
 # GET routes of the mock that are not compared, each with the reason. A new GET route must
 # be added to COMPARED or here; the test below says so.
 NOT_COMPARED = {
@@ -220,9 +228,6 @@ NOT_COMPARED = {
     "/api/instances/{}/files": "the fake device of the unit tests has no file listing",
     "/api/instances/{}/info": "the fake device of the unit tests has no property dump",
     "/api/automation/record/{}": "the same shape as an entry of /api/automation/record",
-    "/api/ai/conversations/{}": "the demo has no model, so no conversation exists to compare",
-    "/api/ai/pilot/sessions/{}": "the demo has no model, so no pilot session exists to compare",
-    "/api/ai/pilot/{}/summary": "the demo has no model, so no pilot recording exists to compare",
     "/api/backups/download": "a file, served in the demo as a blob by transport.js",
     "/api/instances/{}/frame.jpg": "a picture, drawn in the page by screen.js",
     "/api/instances/{}/stream.mjpg": "a picture stream, drawn in the page by screen.js",
@@ -335,7 +340,25 @@ def _fill_real(a) -> dict[str, str]:
     asked = c.post("/api/approvals", json={"tool": "restart_androids", "arguments": {"selector": "1"}, "caller": "mcp:test", "session": "session-1"})
     assert asked.status_code == 201, asked.text
     ids["approval"] = asked.json()["approval"]["id"]
+    ids.update(_fill_ai(a))
     return ids
+
+
+def _fill_ai(a) -> dict[str, str]:
+    """One finished Assistant conversation and one trained Pilot session, both played by scripted models."""
+    c, ai = a.client, "/api/ai"
+    script = Scripted(call("farm_status"), say("Two Androids, both stopped."))
+    a.farm.use("assistant", Assistant(a.farm.config, a.farm.paths, a.farm.tasks, client_factory=lambda name: script,
+                                      invoke=lambda *args, **kw: ToolResult({"ok": True}, "2 Android(s): 2 stopped."),
+                                      status=lambda client: "2 Android(s): 2 stopped."))
+    conversation = c.post(f"{ai}/conversations", json={}).json()["conversation"]["id"]
+    a.wait(c.post(f"{ai}/conversations/{conversation}/messages", json={"text": "how many Androids are there?"}))
+    a.farm.pilot._client_factory = lambda name: Scripted(call("tap", element=0, reason="the search form is behind it"))
+    started = c.post(f"{ai}/pilot", json={"goal": "Open the search form", "package": PKG, "selector": "1", "success": "id:query", "dataset": "pilot-form"})
+    assert started.status_code == 202, started.text
+    session = a.wait(started, 30)["id"]
+    a.wait(c.post(f"{ai}/pilot/pilot-form/train"), 30)
+    return {"conversation": conversation, "session": session}
 
 
 @pytest.fixture(scope="module")
@@ -346,17 +369,31 @@ def answers(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("demo")
     fast = {"settle_seconds": 0, "human_jitter": False, "step_timeout": 1, "run_timeout": 30, "read_timeout": 5}
     real = {}
-    with api(tmp / "farm", {"automation": fast}) as a:
+    ai = {"default_model": "local", "models": {"local": {"provider": "ollama", "base_url": "http://127.0.0.1:9", "model": "small:3b"}}}
+    with api(tmp / "farm", {"automation": fast, "ai": ai}) as a:
         ids = _fill_real(a)
         for name, url, _ in COMPARED:
             response = a.client.get(url.format(**ids))
             real[name] = (response.status_code, response.json())
         schema = a.app.openapi()
     urls = json.dumps({name: mock_url for name, _, mock_url in COMPARED})
+    # The mock gets the same: a conversation that has answered, and a Pilot session that has run, been
+    # trained and ended, after the clock has moved far enough for the scripts to play out.
     mock = _node_json(tmp, f"""
-m.handle('POST', '/api/auth/login', {{}});
+const post = (url, body) => m.handle('POST', url, body);
+let now = Date.now() / 1000;
+m.setClock(() => now);
+const wait = (seconds) => {{ for (let i = 0; i < seconds * 2; i++) {{ now += 0.5; m.advance(); }} }};
+post('/api/auth/login', {{}});
+const made = {{}};
+made.conversation = post('/api/ai/conversations', {{}}).body.conversation.id;
+post(`/api/ai/conversations/${{made.conversation}}/messages`, {{ text: 'how many Androids are running?' }});
+made.session = post('/api/ai/pilot', {{ goal: 'Open the search form', package: 'example.notes', selector: '1', dataset: 'pilot-form' }}).body.task.id;
+wait(45);
+post('/api/ai/pilot/pilot-form/train', {{}});
+wait(8);
 const out = {{}};
-for (const [name, url] of Object.entries({urls})) out[name] = m.handle('GET', url);
+for (const [name, url] of Object.entries({urls})) out[name] = m.handle('GET', url.replace(/\\{{(\\w+)\\}}/g, (_, key) => made[key]));
 console.log(JSON.stringify(out));""")
     return {name: (*real[name], mock[name]["status"], mock[name]["body"]) for name, _, _ in COMPARED}, schema
 
@@ -394,7 +431,7 @@ def test_the_mock_answers_satisfy_the_openapi_schema(answers):
     defs = schema.get("components", {}).get("schemas", {})
     checked = 0
     for name, real_url, _ in COMPARED:
-        path = re.sub(r"\{(task|run|approval|recording)\}", "{}", real_url.split("?")[0])
+        path = re.sub(r"\{(task|run|approval|recording|conversation|session)\}", "{}", real_url.split("?")[0])
         for template, item in schema["paths"].items():
             want, have = template.strip("/").split("/"), path.strip("/").split("/")
             if len(want) != len(have) or not all(w.startswith("{") or w == h for w, h in zip(want, have, strict=True)):

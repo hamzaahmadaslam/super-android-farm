@@ -102,6 +102,10 @@ export function seed(t) {
   const config = JSON.parse(JSON.stringify(configData.defaults));
   config.farm_name = 'Super Farm demo';
   config.network.gateways = { eu1: { provider: 'openvpn', profile: 'example-berlin.ovpn', credentials: 'default', subnet: '192.0.2.0/24' } };
+  // The one model profile of the demo: a script, not a server. The provider is one the settings accept; the address is
+  // not an address at all, and nothing is ever sent anywhere (routes/ai.js).
+  config.ai.models = { 'demo-script': { provider: 'ollama', base_url: 'demo-script://no-server', model: 'scripted-stand-in', api_key_secret: '', tools: true, vision: false, timeout: 120, temperature: 0.1, num_ctx: 16384, max_tokens: 1024, headers: {}, extra: {} } };
+  config.ai.default_model = 'demo-script';
 
   const instances = {
     1: instance(1, t, { name: 'Checkout tests 1', tags: ['eu', 'tests'], running: true, mode: 'nvidia', ago: 5400,
@@ -155,6 +159,7 @@ export function seed(t) {
     ],
     approvals: seedApprovals(t),
     assistant: { nextAt: 0, round: 0 },
+    ai: { conversations: [], sessions: [], held: {}, seq: 0 },
     shell: {},
   };
 }

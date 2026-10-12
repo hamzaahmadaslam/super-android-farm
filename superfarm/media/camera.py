@@ -268,14 +268,14 @@ class Camera:
         if not name:
             raise RuntimeError(
                 f"{device} does not exist. Camera devices are created by the one-time host setup: "
-                "set media.camera.enabled, then run `sudo sf host apply`.")
+                "set media.camera.enabled, then run `sf host apply`.")
         if not name.startswith(F.OUR_LABELS):
             raise RuntimeError(
                 f"{device} is not a Super Farm camera (it is {name!r}); refusing to write to it. "
-                "Set media.camera.device_base to a free range and run `sudo sf host apply`.")
+                "Set media.camera.device_base to a free range and run `sf host apply`.")
         if not os.access(device, os.R_OK | os.W_OK):
             raise RuntimeError(
-                f"no permission to use {device}. Run `sudo sf host apply`; if the daemon's user was "
+                f"no permission to use {device}. Run `sf host apply`; if the daemon's user was "
                 "only just added to the device's group, log out and in (or restart the daemon).")
 
     def _has_format(self, device: str) -> bool:
@@ -318,17 +318,17 @@ class Camera:
         tools = {name: which(name) for name in ("ffmpeg", "ffprobe", "v4l2-ctl")}
         if not c.enabled:
             reasons.append("media.camera.enabled is off: set it to true in the farm's config, "
-                           "then run `sudo sf host apply`.")
+                           "then run `sf host apply`.")
         if not loaded:
-            reasons.append("the v4l2loopback kernel module is not loaded: run `sudo sf host apply` "
+            reasons.append("the v4l2loopback kernel module is not loaded: run `sf host apply` "
                            "(build and, under Secure Boot, sign it first: native/v4l2loopback).")
         if foreign:
             reasons.append(f"/dev/video{foreign[0]} (and {len(foreign) - 1} more) belong to something else: "
-                           "set media.camera.device_base to a free range, then `sudo sf host apply`.")
+                           "set media.camera.device_base to a free range, then `sf host apply`.")
         if absent and c.slots:
-            reasons.append(f"{len(absent)} of {c.slots} camera devices do not exist: run `sudo sf host apply`.")
+            reasons.append(f"{len(absent)} of {c.slots} camera devices do not exist: run `sf host apply`.")
         if no_access:
-            reasons.append(f"no permission for {len(no_access)} camera devices: run `sudo sf host apply`, "
+            reasons.append(f"no permission for {len(no_access)} camera devices: run `sf host apply`, "
                            "then log out and in if the daemon's user was just added to the group.")
         for name, path in tools.items():
             if not path:

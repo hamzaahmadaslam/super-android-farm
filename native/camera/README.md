@@ -79,7 +79,7 @@ lib/hw/audio.primary.default.so  lib64/hw/audio.primary.default.so   redroid's o
   and rebuild the Android 13 image. By hand it is two lines of Dockerfile:
   `FROM <your redroid 13 image>` and `COPY vendor/ /vendor/`.
 
-Then enable `media.camera.enabled`, run `sudo sf host apply` once (creates the loopback
+Then enable `media.camera.enabled`, run `sf host apply` once (creates the loopback
 devices), and recreate the Androids that should have a microphone (the FIFO mount is part
 of how the container is created).
 

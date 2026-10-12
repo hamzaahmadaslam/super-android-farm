@@ -167,7 +167,7 @@ class NetworkConfig(_Model):
 
 
 class DeviceConfig(_Model):
-    profile: str = Field("random", description="Device model an Android reports: a preset name (see `sf device profiles`), `random`, or `none` to keep the image's own identity.")
+    profile: str = Field("random", description="Device model an Android reports: a preset name (the Create form in the panel lists them), `random`, or `none` to keep the image's own identity.")
     randomize_android_id: bool = Field(True, description="Give each new Android its own random android_id.")
     locale: str = Field("en-US", description="System language.")
     timezone: str = Field("", description="Time zone as an Olson name, e.g. Europe/Berlin. Empty = the host's zone.")

@@ -86,7 +86,7 @@ def test_run_args_refuse_what_cannot_work(farm):
     with pytest.raises(ValueError, match="not defined"):
         gateway.run_args(config, paths, "asia", subnet="10.213.0.0/24", image="i", uplink_gw="172.18.0.1")
     vpn.delete_credentials(paths, "default")
-    with pytest.raises(ValueError, match="sf vpn credentials set default"):
+    with pytest.raises(ValueError, match="sf vpn credentials default"):
         gateway.run_args(config, paths, "eu", subnet="10.213.0.0/24", image="i", uplink_gw="172.18.0.1")
     wrong = make_config(gateways={"eu": {"profile": "exit.ovpn", "provider": "wireguard"}})
     with pytest.raises(ValueError, match="not a wireguard profile"):

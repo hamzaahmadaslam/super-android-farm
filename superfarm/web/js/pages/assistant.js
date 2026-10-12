@@ -171,7 +171,14 @@ export async function render(root, params, scope) {
     const data = (await get(`${API}/${id}`, { after: last })).conversation;
     if (!current || current.id !== id) return;                 // the operator opened another one meanwhile
     if (last === 0 && data.events.length) replace(log);
-    for (const event of data.events) draw(event);
+    // Two refreshes can be in flight at once (sending a message and the poll timer), both
+    // asking for "events after N". Each event has a number: draw it only if it is newer than
+    // what is already on the page, so the same message can never appear twice.
+    for (const event of data.events) {
+      if (event.n <= last) continue;
+      draw(event);
+      last = event.n;
+    }
     last = Math.max(last, data.last);
     current = data;
     drawHead();

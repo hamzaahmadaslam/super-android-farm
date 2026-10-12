@@ -405,7 +405,7 @@ def load_profile(paths: Paths, name: str) -> Profile:
     try:
         data = path.read_bytes()
     except FileNotFoundError:
-        raise KeyError(f"no VPN profile named {name!r}; see `sf vpn list`") from None
+        raise KeyError(f"no VPN profile named {name!r}; see `sf vpn profiles`") from None
     return sanitise(name, data, read_file=_sibling_reader(paths))
 
 

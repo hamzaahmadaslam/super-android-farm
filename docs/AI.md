@@ -355,7 +355,7 @@ What was observed with the 3.4-billion-parameter model:
 - **Assistant, questions:** correct and fast.
 - **Assistant, multi-step changes:** it gets there, clumsily. It guesses arguments, each
   wrong guess fails safely, and it reports what happened. Expect extra tool calls.
-- **Pilot:** about 6 runs in 10 verified on a five-action goal, and very uneven from one
+- **Pilot:** about 6 runs in 10 verified on a five-action goal, and uneven from one
   session to the next. It finds a target that is on screen, scrolls when told the screen
   scrolls, and loses its way when it has to choose between sections. Because a failed run
   is discarded and only verified runs are trained, a weak model costs time, not
