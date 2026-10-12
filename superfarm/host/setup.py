@@ -13,6 +13,9 @@ Design rules:
 * Two modes. The full run (install time) writes configuration files and installs
   packages. The boot run (`--boot`, from superfarm-host.service) only re-establishes what
   does not survive a reboot: loaded modules, zram, KSM, camera devices, /run folders.
+* `only` limits a run to named steps (`--only packages`). The installer test uses it to
+  install the distribution packages inside a container, where kernel modules, sysctl and
+  systemd do not exist.
 * Root executes fixed commands with validated values. Nothing from the farm's YAML is
   ever passed to a shell; the only free-form values (user, group, compression algorithm)
   are checked against strict patterns first.
@@ -31,10 +34,11 @@ import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from ..config import Config, load_config
-from ..paths import REPO_DIR, Paths, get_paths
+from ..paths import Paths, get_paths
+from ..resources import resource_path
 from ..util import proc
 from ..util.files import atomic_write
 from . import capacity, distro as distro_mod, modules
@@ -43,8 +47,12 @@ RUN_DIR = "/run/superfarm"
 SYSCTL_FILE = "/etc/sysctl.d/90-superfarm.conf"
 TMPFILES_FILE = "/etc/tmpfiles.d/superfarm.conf"
 UNIT_DIR = "/etc/systemd/system"
-UNITS = ("superfarm-host.service", "superfarm.service")
+# The only unit root installs. The daemon itself is a *user* unit, installed without root
+# by `sf service install` (see superfarm.host.service).
+UNITS = ("superfarm-host.service",)
 DEFAULT_GROUP = "docker"
+# Every step id plan() can produce, in order.
+STEP_IDS = ("packages", "docker-service", "groups", "modules", "sysctl", "run-dirs", "zram", "ksm", "camera", "systemd")
 
 _NAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
 _ALGO = re.compile(r"^[a-z0-9-]{1,20}$")
@@ -379,8 +387,8 @@ def _camera_step(config: Config, root: Path, which: Callable[[str], str | None],
     if st == "missing":
         return _step("camera", "Virtual cameras", why, [], boot=True,
                      note="the v4l2loopback module is not installed for this kernel: build it with "
-                          "native/v4l2loopback/build.sh (and sign it with scripts/host/sign-module.sh under "
-                          "Secure Boot), then run `sudo sf host apply` again")
+                          f"`sudo {resource_path('native', 'v4l2loopback', 'build.sh')} install` (and sign it "
+                          "with `sf host sign-module -- v4l2loopback` under Secure Boot), then run `sf host apply` again")
     if st != "loaded":
         # devices=0: no camera exists until one is created for a specific Android below, so
         # device numbers always match Android ids. max_buffers=8 is what the Android HAL expects.
@@ -398,24 +406,24 @@ def _camera_step(config: Config, root: Path, which: Callable[[str], str | None],
                  note=f"{cam.slots} devices, /dev/video{first} .. /dev/video{first + cam.slots - 1}")
 
 
-def render_unit(template: str, *, user: str, group: str, run_group: str, groups: list[str], uid: int,
-                home: Path, python: str, sf_bin: str) -> str:
+def render_unit(template: str, **values: str | os.PathLike) -> str:
     """Fill the @PLACEHOLDER@ fields of a unit template from deploy/systemd.
 
-    group is the user's primary group (the daemon's Group=); run_group owns /run/superfarm."""
-    values = {"USER": user, "GROUP": group, "RUN_GROUP": run_group, "SUPPLEMENTARY_GROUPS": " ".join(groups),
-              "UID": str(uid), "SUPERFARM_HOME": str(home), "PYTHON": python, "SF_BIN": sf_bin}
-    for v in values.values():
-        # Unit files are line-based; a newline or quote in a value could add directives.
+    Keyword names are the placeholder names in lower case (python="/x" fills @PYTHON@).
+    Every placeholder in the template must be given: a field left unfilled would reach
+    systemd as a literal @NAME@."""
+    filled = {k.upper(): str(v) for k, v in values.items()}
+    for key, v in filled.items():
+        # Unit files are line-based; a newline or quote in a value could add directives,
+        # and % starts a systemd specifier.
         if re.search(r"[\n\r\"'\\%]", v):
             raise ValueError(f"value not allowed in a unit file: {v!r}")
-    for key in ("SUPERFARM_HOME", "PYTHON", "SF_BIN"):
         # Unquoted Environment= and ExecStart= values split on spaces.
-        if re.search(r"\s", values[key]):
-            raise ValueError(f"{key} contains whitespace ({values[key]!r}); systemd units need a path without spaces "
+        if re.search(r"\s", v):
+            raise ValueError(f"{key} contains whitespace ({v!r}); systemd units need a value without spaces "
                              "(move the farm home or the virtual environment)")
     out = template
-    for k, v in values.items():
+    for k, v in filled.items():
         out = out.replace(f"@{k}@", v)
     left = re.findall(r"@[A-Z_]+@", out)
     if left:
@@ -424,35 +432,27 @@ def render_unit(template: str, *, user: str, group: str, run_group: str, groups:
 
 
 def _units_step(config: Config, paths: Paths, user: str, group: str, root: Path) -> dict:
-    try:
-        pw = pwd.getpwnam(user)
-        uid, primary = pw.pw_uid, grp.getgrgid(pw.pw_gid).gr_name
-    except KeyError:
-        uid, primary = os.getuid(), group
-    known = _groups_file(root)
-    # A unit naming a group that does not exist refuses to start; `render` is missing on
-    # some distributions.
-    groups = [g for g in dict.fromkeys((group, "docker", "video", "render", "audio")) if g in known and g != primary]
-    python = sys.executable
-    sf_bin = str(Path(sys.executable).parent / "sf")
     actions: list[dict] = []
     notes: list[str] = []
     for unit in UNITS:
-        src = REPO_DIR / "deploy" / "systemd" / unit
+        src = resource_path("deploy", "systemd", unit)
         try:
             template = src.read_text()
         except OSError:
             notes.append(f"{src} not found; unit {unit} not installed")
             continue
         actions.append(_write(f"{UNIT_DIR}/{unit}", render_unit(
-            template, user=user, group=primary, run_group=group, groups=groups, uid=uid, home=paths.home,
-            python=python, sf_bin=sf_bin)))
+            # abspath, not resolve(): a virtual environment's python is a link to the system
+            # interpreter, and the unit must start the environment's one.
+            template, user=user, run_group=group, superfarm_home=paths.home,
+            python=os.path.abspath(sys.executable))))
     if actions:
         actions += [_run(["systemctl", "daemon-reload"], timeout=60),
                     _run(["systemctl", "enable", "superfarm-host.service"], timeout=60)]
-        notes.append("start the daemon at boot with: sudo systemctl enable --now superfarm.service")
-    return _step("systemd", "Install systemd units",
-                 "superfarm-host redoes the boot-time host setup; superfarm runs the daemon as the desktop user.",
+        notes.append(f"the daemon is a user service of {user}, installed without root: sf service install")
+    return _step("systemd", "Install the boot unit",
+                 "superfarm-host redoes the boot-time host setup (modules, cameras, /run folders) as root. "
+                 "The daemon is not installed here: it runs as the desktop user's own service.",
                  actions, boot=False, note="; ".join(notes))
 
 
@@ -493,17 +493,26 @@ def _execute(action: dict, root: Path, runner: Callable[..., proc.Result], varia
 
 def apply(config: Config, paths: Paths, *, dry_run: bool = False, boot: bool | None = None,
           user: str | None = None, group: str | None = None, root: Path | str = "/",
-          runner: Callable[..., proc.Result] | None = None, steps: list[dict] | None = None) -> list[dict]:
+          runner: Callable[..., proc.Result] | None = None, steps: list[dict] | None = None,
+          only: Iterable[str] | None = None) -> list[dict]:
     """Run the plan. Returns the steps with status ok | failed | dry-run and, per step,
     `commands`: every command and file exactly as executed (or as it would be).
+
+    only   step ids to run (see STEP_IDS); every other step is left out of the result.
 
     A real run must be root. A dry run needs no privileges and touches nothing."""
     root = Path(root)
     if steps is None:
         steps = plan(config, paths, boot=boot, user=user, group=group, root=root)
+    if only is not None:
+        wanted = set(only)
+        unknown = wanted - set(STEP_IDS)
+        if unknown:
+            raise ValueError(f"unknown step(s) {', '.join(sorted(unknown))}; steps are: {', '.join(STEP_IDS)}")
+        steps = [s for s in steps if s["id"] in wanted]
     if not dry_run and runner is None and os.geteuid() != 0:
-        raise PermissionError("host setup needs root: run `sudo "
-                              f"{Path(sys.executable).parent / 'sf'} host apply` "
+        raise PermissionError("host setup needs root: run `sf host apply`, which asks for sudo itself, or "
+                              f"`sudo {sys.executable} -m superfarm.host.setup apply` "
                               "(add --dry-run to see every command first)")
     runner = runner or proc.run
     variables: dict[str, str] = {}
@@ -551,12 +560,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--user", default=None, help="desktop user the farm runs as (default: the sudo caller)")
     ap.add_argument("--group", default=None, help=f"group that owns {RUN_DIR} (default: {DEFAULT_GROUP})")
     ap.add_argument("--home", default=None, help="farm home (default: $SUPERFARM_HOME)")
+    ap.add_argument("--only", default=None, metavar="STEP[,STEP]",
+                    help=f"run only these steps ({', '.join(STEP_IDS)})")
     args = ap.parse_args(argv)
     paths = get_paths(args.home or sudo_home())
     try:
         config = load_config(paths)
         steps = apply(config, paths, dry_run=args.dry_run or args.command == "plan", boot=args.boot or None,
-                      user=args.user, group=args.group)
+                      user=args.user, group=args.group,
+                      only=[s for s in args.only.split(",") if s] if args.only else None)
     except (PermissionError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

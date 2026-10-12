@@ -13,9 +13,7 @@ from superfarm.core import instances as inst  # noqa: E402
 from superfarm.core.instances import (  # noqa: E402
     InstanceBusy,
     InstanceError,
-    MemoryGuardError,
     StartError,
-    _MemoryGuard,
     trim_hash,
     trim_list,
 )
@@ -106,7 +104,7 @@ def test_first_start_builds_the_pair_network_first(farm):
     result = farm.mgr.start(1)
 
     assert farm.docker.names_called("create") == [NET, ANDROID]
-    assert farm.events.index("net-wait") > farm.events.index("net-image")
+    assert "net-wait" in farm.events
     net, android = farm.docker.containers[NET], farm.docker.containers[ANDROID]
     assert net["labels"]["io.superfarm.plan"] == android["labels"]["io.superfarm.plan"] != ""
     assert option(android["args"], "--network") == f"container:{NET}"
@@ -117,8 +115,21 @@ def test_first_start_builds_the_pair_network_first(farm):
     assert result["state"] == "booted" and result["recreated"] and result["gpu"] == "software"
     assert result["serial"] == "127.0.0.1:17001" and result["warnings"] == []
     assert hooked == [(1, "127.0.0.1:17001")]
-    assert farm.store.state_get(1, "last_error") is None and farm.store.state_get(1, "gpu") == {"mode": "software", "node": ""}
+    assert farm.store.state_get(1, "last_error") is None
+    assert farm.store.state_get(1, "gpu") == {"mode": "software", "node": "", "kind": "", "label": ""}
     assert farm.mgr.status(1)["state"] == "booted"
+
+
+def test_the_card_the_host_module_chose_is_shown_on_the_android(farm):
+    one(farm)
+    farm.gpu.mode, farm.gpu.node = "intel", "/dev/dri/renderD128"
+    farm.gpu.kind, farm.gpu.label = "igpu", "Intel UHD Graphics 770 (integrated, Mesa)"      # as host.gpu.GpuChoice carries them
+    result = farm.mgr.start(1)
+    assert result["gpu_label"] == "Intel UHD Graphics 770 (integrated, Mesa)" and result["gpu_reason"] == "test"
+    shown = farm.mgr.status(1)["gpu"]
+    assert shown == {"requested": "auto", "mode": "intel", "node": "/dev/dri/renderD128", "kind": "igpu",
+                     "label": "Intel UHD Graphics 770 (integrated, Mesa)"}
+    assert farm.mgr.list_status()[0]["gpu"] == shown
 
 
 def test_post_boot_applies_identity_animations_and_props(farm):
@@ -233,42 +244,19 @@ def test_boot_timeout_is_an_error_that_names_the_setting(farm):
         inst.time.monotonic = real
 
 
-def test_memory_guard_refuses_before_touching_docker(farm):
-    one(farm)
-    farm.mem_mb = 900
-    with pytest.raises(MemoryGuardError, match="memory_guard_mb"):
-        farm.mgr.start(1)
-    assert farm.docker.containers == {} and farm.docker.names_called("create") == []
-    farm.mgr.config.performance.memory_guard_mb = 0          # guard off
-    assert farm.mgr.start(1)["state"] == "booted"
-
-
-def test_memory_guard_counts_androids_that_are_still_booting():
-    guard = _MemoryGuard()
-    guard.reserve(1, 1100, 1500, 3000)
-    with pytest.raises(MemoryGuardError, match="already promised"):
-        guard.reserve(2, 1100, 1500, 2500)                    # 2500 - 1100 < 1500
-    guard.reserve(1, 1100, 1500, 1600)                        # the same Android again is not counted twice
-    guard.release(1)
-    guard.reserve(2, 1100, 1500, 2500)
-    guard.reserve(3, 1100, 0, 10)                             # guard 0 = off
-    guard.reserve(4, 1100, 1500, -1)                          # unreadable meminfo: do not block
-
-
-def test_nvidia_start_ensures_the_relay_and_mounts_its_socket(farm):
+def test_nvidia_start_uses_the_mounts_the_gpu_module_returns(farm):
+    """The host module starts the relay and returns the socket and runtime mounts; the
+    manager passes them on unchanged and adds none of its own."""
     one(farm)
     farm.gpu.mode, farm.gpu.node = "nvidia", "/dev/dri/renderD129"
     farm.gpu.boot_args = ["androidboot.redroid_gpu_mode=venus"]
+    farm.gpu.run_args = ["-v", "/run/venus/renderD129:/venus", "-v", "/rt/vulkan.virtio.so:/vendor/lib64/hw/vulkan.virtio.so:ro"]
     result = farm.mgr.start(1)
-    assert "relay:/dev/dri/renderD129" in farm.events
     args = farm.docker.containers[ANDROID]["args"]
-    assert "/run/venus/renderD129:/venus" in options(args, "-v")
+    assert options(args, "-v") == [f"{VOLUME}:/data", "/run/venus/renderD129:/venus",
+                                   "/rt/vulkan.virtio.so:/vendor/lib64/hw/vulkan.virtio.so:ro"]
     assert labels_of(args)["io.superfarm.gpu"] == "nvidia" and result["gpu"] == "nvidia"
-    # a GPU module that already mounts the socket is not given a second mount
-    farm.gpu.run_args = ["-v", "/elsewhere:/venus"]
-    farm.mgr.recreate(1)
-    mounts = options(farm.docker.containers[ANDROID]["args"], "-v")
-    assert [m for m in mounts if m.endswith(":/venus")] == ["/elsewhere:/venus"]
+    assert labels_of(args)["io.superfarm.gpu-node"] == "/dev/dri/renderD129"
 
 
 def test_gpu_choice_sees_running_androids_per_card(farm):
@@ -287,19 +275,22 @@ def test_unavailable_gpu_mode_fails_with_the_reason(farm):
         raise ValueError("gpu mode nvidia is not available: the relay is not built")
 
     farm.mgr.backends.gpu_choose = refuse
-    with pytest.raises(ValueError, match="relay is not built"):
+    with pytest.raises(StartError, match="Android 1: gpu mode nvidia is not available: the relay is not built"):
         farm.mgr.start(1)
     assert "relay is not built" in farm.mgr.status(1)["last_error"]
+    assert farm.docker.containers == {}
 
 
-def test_gateway_is_brought_up_before_its_member(tmp_path):
-    farm = Farm(tmp_path, {"network": {"gateways": {"eu": {"profile": "eu.ovpn"}}}})
-    try:
-        farm.mgr.create(template={"network": {"mode": "gateway", "gateway": "eu"}})
+def test_a_network_that_cannot_be_planned_fails_the_start_with_the_reason(farm):
+    one(farm)
+
+    def refuse(r, config, paths, store, docker):
+        raise ValueError("VPN profile 'eu.ovpn' asks for a username and password, and none is stored")
+
+    farm.mgr.backends.sidecar_run_args = refuse
+    with pytest.raises(StartError, match=r"Android 1: network \(direct\): VPN profile 'eu.ovpn' asks"):
         farm.mgr.start(1)
-        assert farm.events.index("gateway:eu") < farm.events.index("net-wait")
-    finally:
-        farm.close()
+    assert farm.docker.containers == {}
 
 
 def test_extra_run_args_providers_reach_the_android_and_the_plan(farm):
@@ -774,14 +765,6 @@ def test_bulk_runs_every_android_and_one_failure_does_not_stop_the_rest(farm):
     assert sorted(task.results) == [1, 3] and farm.mgr.select("running") == []
     with pytest.raises(ValueError, match="unknown action"):
         farm.mgr.bulk("explode", "all")
-
-
-def test_bulk_start_respects_the_memory_guard_per_android(farm):
-    farm.mgr.create(count=2)
-    farm.mem_mb = 1000
-    task = farm.tasks.wait(farm.mgr.bulk("start", "all"), timeout=20)
-    assert all(not r["ok"] and "MemoryGuardError" in r["detail"] for r in task.results.values())
-    assert farm.docker.containers == {}
 
 
 def test_autostart_picks_configured_and_flagged_androids(farm):

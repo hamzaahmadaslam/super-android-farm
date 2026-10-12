@@ -1,5 +1,6 @@
 """Host setup: the plan, dry runs, idempotent application against a fake root."""
 import getpass
+import grp
 import os
 import re
 
@@ -7,11 +8,15 @@ import pytest
 
 from superfarm.config import Config
 from superfarm.host import distro, setup
-from superfarm.paths import REPO_DIR, get_paths
+from superfarm.paths import get_paths
+from superfarm.resources import resource_path
 from superfarm.util.proc import CommandError, Result
 
 REL = "6.8.0-test"
 ME = getpass.getuser()
+# Owner of the runtime folders in apply tests. An unprivileged run never changes owners, so a
+# name that does not exist proves that; as root (the distro containers) the group must be real.
+RUN_GROUP = grp.getgrgid(os.getgid()).gr_name if os.geteuid() == 0 else "nogroup-in-test"
 UBUNTU = distro.Distro(id="ubuntu", name="Ubuntu", family="debian", kernel=REL)
 FEDORA = distro.Distro(id="fedora", name="Fedora", family="fedora", kernel=REL)
 
@@ -229,65 +234,55 @@ def test_camera_devices_one_per_slot_skipping_existing(tmp_path, paths):
 def test_camera_without_the_module_explains_how_to_get_it(tmp_path, paths):
     cfg = Config.model_validate({"media": {"camera": {"enabled": True}}})
     c = plan(fake_root(tmp_path, on_disk=["videodev"]), paths, cfg)["camera"]
-    assert c["actions"] == [] and "native/v4l2loopback/build.sh" in c["detail"] and "sign-module.sh" in c["detail"]
+    assert c["actions"] == [] and "native/v4l2loopback/build.sh install" in c["detail"]
+    assert "sf host sign-module -- v4l2loopback" in c["detail"] and "`sf host apply`" in c["detail"]
 
 
 # ------------------------------------------------------------------ systemd units
 
-def test_unit_templates_exist_and_render_completely(tmp_path, paths):
-    for unit in setup.UNITS:
-        template = (REPO_DIR / "deploy" / "systemd" / unit).read_text()
-        out = setup.render_unit(template, user="farmer", group="farmer", run_group="docker", groups=["docker", "video"],
-                                uid=1000, home=paths.home, python="/opt/sf/bin/python", sf_bin="/opt/sf/bin/sf")
-        assert not re.search(r"@[A-Z_]+@", out)
-        assert "[Unit]" in out and "[Service]" in out and "[Install]" in out
+HOST_VALUES = dict(user="farmer", run_group="docker", superfarm_home="/srv/farm", python="/opt/sf/bin/python")
 
 
-def test_daemon_unit_runs_as_the_user_and_keeps_the_relay_alive(paths):
-    template = (REPO_DIR / "deploy" / "systemd" / "superfarm.service").read_text()
-    out = setup.render_unit(template, user="farmer", group="farmer", run_group="docker", groups=["docker", "video", "render"],
-                            uid=1000, home=paths.home, python="/opt/sf/bin/python", sf_bin="/opt/sf/bin/sf")
-    lines = [ln for ln in out.splitlines() if ln and not ln.startswith("#")]
-    assert "User=farmer" in lines and "SupplementaryGroups=docker video render" in lines
-    assert "ExecStart=/opt/sf/bin/sf serve" in lines and f"Environment=SUPERFARM_HOME={paths.home}" in lines
-    assert "Environment=XDG_RUNTIME_DIR=/run/user/1000" in lines
-    assert "KillMode=process" in lines                    # a daemon restart must not kill the NVIDIA relay
-    assert {"NoNewPrivileges=true", "PrivateTmp=true", "ProtectSystem=full"} <= set(lines)
-    # Each of these would hide the GPU, camera and sound devices from the daemon.
-    assert not any(ln.startswith(("PrivateDevices=", "DevicePolicy=", "ProtectClock=", "ProtectHome=")) for ln in lines)
-    assert "User=root" not in lines
+def test_boot_unit_template_renders_completely():
+    assert setup.UNITS == ("superfarm-host.service",)         # the daemon is a user unit, not installed by root
+    out = setup.render_unit(resource_path("deploy", "systemd", "superfarm-host.service").read_text(), **HOST_VALUES)
+    assert not re.search(r"@[A-Z_]+@", out)
+    assert "[Unit]" in out and "[Service]" in out and "[Install]" in out
 
 
-def test_boot_unit_is_a_root_oneshot_in_boot_mode(paths):
-    template = (REPO_DIR / "deploy" / "systemd" / "superfarm-host.service").read_text()
-    out = setup.render_unit(template, user="farmer", group="farmer", run_group="docker", groups=[], uid=1000,
-                            home=paths.home, python="/opt/sf/bin/python", sf_bin="/opt/sf/bin/sf")
+def test_boot_unit_is_a_root_oneshot_in_boot_mode():
+    out = setup.render_unit(resource_path("deploy", "systemd", "superfarm-host.service").read_text(), **HOST_VALUES)
     lines = [ln for ln in out.splitlines() if ln and not ln.startswith("#")]
     assert "Type=oneshot" in lines and "User=root" in lines and "RemainAfterExit=yes" in lines
     assert "ExecStart=/opt/sf/bin/python -m superfarm.host.setup apply --boot" in lines
+    assert "Environment=SUPERFARM_HOME=/srv/farm" in lines and "Environment=SUPERFARM_USER=farmer" in lines
     assert "Environment=SUPERFARM_BOOT=1" in lines and "Environment=SUPERFARM_GROUP=docker" in lines
-    assert any(ln.startswith("Before=") and "docker.service" in ln for ln in lines)
+    assert "Before=docker.service" in lines          # a system unit cannot order against the user's daemon unit
 
 
-@pytest.mark.parametrize("field,value", [("user", "x\nExecStartPre=/bin/evil"), ("home", "/home/a b/farm"), ("python", "/x/%h/python")])
-def test_unit_values_cannot_inject_directives(paths, field, value):
-    kw = dict(user="farmer", group="farmer", run_group="docker", groups=[], uid=1000, home=paths.home,
-              python="/opt/sf/bin/python", sf_bin="/opt/sf/bin/sf")
-    kw[field] = value
+@pytest.mark.parametrize("field,value", [("user", "x\nExecStartPre=/bin/evil"), ("superfarm_home", "/home/a b/farm"),
+                                         ("python", "/x/%h/python"), ("user", 'a"b'), ("python", "/x/y\\z")])
+def test_unit_values_cannot_inject_directives(field, value):
     with pytest.raises(ValueError):
-        setup.render_unit("User=@USER@\nEnvironment=SUPERFARM_HOME=@SUPERFARM_HOME@\nExecStart=@PYTHON@\n", **kw)
+        setup.render_unit("User=@USER@\nEnvironment=SUPERFARM_HOME=@SUPERFARM_HOME@\nExecStart=@PYTHON@\nX=@RUN_GROUP@\n",
+                          **{**HOST_VALUES, field: value})
 
 
-def test_unknown_placeholder_is_an_error(paths):
+def test_unknown_or_unfilled_placeholder_is_an_error():
     with pytest.raises(ValueError, match="@TYPO@"):
-        setup.render_unit("X=@TYPO@\n", user="a", group="a", run_group="a", groups=[], uid=1, home=paths.home, python="/p", sf_bin="/s")
+        setup.render_unit("X=@TYPO@\n", user="a")
+    with pytest.raises(ValueError, match="@PYTHON@"):
+        setup.render_unit("ExecStart=@PYTHON@\nUser=@USER@\n", user="a")
 
 
-def test_systemd_step_installs_both_units_and_enables_only_the_boot_one(tmp_path, paths):
+def test_systemd_step_installs_only_the_boot_unit(tmp_path, paths):
     s = plan(fake_root(tmp_path), paths)["systemd"]
-    assert set(files(s)) == {"/etc/systemd/system/superfarm-host.service", "/etc/systemd/system/superfarm.service"}
+    written = files(s)
+    assert set(written) == {"/etc/systemd/system/superfarm-host.service"}
+    assert f"Environment=SUPERFARM_HOME={paths.home}" in written["/etc/systemd/system/superfarm-host.service"]
+    assert f"Environment=SUPERFARM_USER={ME}" in written["/etc/systemd/system/superfarm-host.service"]
     assert argvs(s) == [["systemctl", "daemon-reload"], ["systemctl", "enable", "superfarm-host.service"]]
-    assert "enable --now superfarm.service" in s["detail"]
+    assert "sf service install" in s["detail"] and "user service" in s["detail"]
 
 
 # ------------------------------------------------------------------ apply
@@ -295,7 +290,7 @@ def test_systemd_step_installs_both_units_and_enables_only_the_boot_one(tmp_path
 def test_real_run_needs_root(tmp_path, paths):
     if os.geteuid() == 0:
         pytest.skip("running as root")
-    with pytest.raises(PermissionError, match="sudo .*host apply"):
+    with pytest.raises(PermissionError, match="run `sf host apply`, which asks for sudo itself"):
         setup.apply(Config(), paths, root=fake_root(tmp_path), user=ME)
 
 
@@ -325,11 +320,12 @@ def test_apply_writes_files_runs_commands_and_is_idempotent(tmp_path, paths):
     rec = Recorder()
     steps = setup.apply(cfg, paths, root=root, runner=rec, user=ME, group=None,
                         steps=[s for s in setup.plan(cfg, paths, root=root, which=lambda n: None, distro=UBUNTU, has_nvidia=False,
-                                                     user=ME, group="nogroup-in-test") if s["id"] != "groups"])
+                                                     user=ME, group=RUN_GROUP) if s["id"] != "groups"])
     assert [s["status"] for s in steps] == ["ok"] * len(steps), [(s["id"], s["detail"]) for s in steps if s["status"] != "ok"]
     assert (root / "etc/modules-load.d/superfarm.conf").read_text().startswith("# Written by")
     assert "kernel.pid_max = 4194304" in (root / "etc/sysctl.d/90-superfarm.conf").read_text()
-    assert (root / "etc/systemd/system/superfarm.service").exists()
+    assert (root / "etc/systemd/system/superfarm-host.service").exists()
+    assert not (root / "etc/systemd/system/superfarm.service").exists()      # the daemon unit belongs to the user
     assert (root / "run/superfarm/venus").is_dir() and (root / "run/superfarm").stat().st_mode & 0o7777 == 0o2770
     assert (root / "sys/kernel/mm/ksm/run").read_text() == "1"
     # The device name printed by zramctl flows into the following commands.
@@ -339,8 +335,38 @@ def test_apply_writes_files_runs_commands_and_is_idempotent(tmp_path, paths):
     stamp = (root / "etc/sysctl.d/90-superfarm.conf").stat().st_mtime_ns
     setup.apply(cfg, paths, root=root, runner=Recorder(), user=ME,
                 steps=[s for s in setup.plan(cfg, paths, root=root, which=lambda n: None, distro=UBUNTU, has_nvidia=False,
-                                             user=ME, group="nogroup-in-test") if s["id"] == "sysctl"])
+                                             user=ME, group=RUN_GROUP) if s["id"] == "sysctl"])
     assert (root / "etc/sysctl.d/90-superfarm.conf").stat().st_mtime_ns == stamp          # unchanged file is not rewritten
+
+
+def test_only_limits_a_run_to_the_named_steps(tmp_path, paths):
+    root = fake_root(tmp_path)
+    rec = Recorder()
+    steps = setup.apply(Config(), paths, root=root, runner=rec, user=ME, only=["packages"],
+                        steps=setup.plan(Config(), paths, root=root, which=lambda n: None, distro=FEDORA,
+                                         has_nvidia=False, user=ME, group=RUN_GROUP))
+    assert [s["id"] for s in steps] == ["packages"] and steps[0]["status"] == "ok"
+    assert rec.calls and all(c[:3] == ["dnf", "install", "-y"] for c in rec.calls)      # nothing but package installs
+    assert not (root / "etc/modules-load.d").exists() and not (root / "etc/systemd").exists()
+    with pytest.raises(ValueError, match="unknown step.*nonsense.*steps are: packages"):
+        setup.apply(Config(), paths, root=root, runner=rec, user=ME, only=["nonsense"], dry_run=True)
+
+
+def test_step_ids_constant_matches_what_plan_produces(tmp_path, paths):
+    cfg = Config.model_validate({"performance": {"zram": {"enabled": True}, "ksm": True},
+                                 "media": {"camera": {"enabled": True, "slots": 1}}})
+    ids = [s["id"] for s in setup.plan(cfg, paths, root=fake_root(tmp_path), which=lambda n: None, distro=UBUNTU,
+                                       has_nvidia=False, user=ME)]
+    assert tuple(ids) == setup.STEP_IDS
+
+
+def test_module_entry_point_accepts_only(tmp_path, paths, capsys, monkeypatch):
+    monkeypatch.setenv("SUPERFARM_USER", ME)
+    assert setup.main(["apply", "--dry-run", "--only", "packages", "--home", str(paths.home)]) == 0
+    out = capsys.readouterr().out
+    assert "Install packages" in out and "Load kernel modules" not in out
+    assert setup.main(["apply", "--dry-run", "--only", "nope", "--home", str(paths.home)]) == 2
+    assert "unknown step" in capsys.readouterr().err
 
 
 def test_one_failing_step_does_not_stop_the_others(tmp_path, paths):
@@ -349,7 +375,7 @@ def test_one_failing_step_does_not_stop_the_others(tmp_path, paths):
     steps = {s["id"]: s for s in setup.apply(
         Config(), paths, root=root, runner=rec, user=ME,
         steps=[s for s in setup.plan(Config(), paths, root=root, which=lambda n: None, distro=UBUNTU, has_nvidia=False,
-                                     user=ME, group="nogroup-in-test") if s["id"] != "groups"])}
+                                     user=ME, group=RUN_GROUP) if s["id"] != "groups"])}
     assert steps["packages"]["status"] == "failed" and "failed on purpose" in steps["packages"]["detail"]
     assert steps["modules"]["status"] == "ok"          # an optional module that will not load is tolerated
     assert steps["sysctl"]["status"] == "ok" and steps["systemd"]["status"] == "ok"
@@ -361,7 +387,7 @@ def test_zram_tool_without_a_device_name_fails_that_step_cleanly(tmp_path, paths
     root = fake_root(tmp_path)
     rec = Recorder(zram="something unexpected\n")
     plan_steps = [s for s in setup.plan(cfg, paths, root=root, boot=True, which=lambda n: None, distro=UBUNTU, user=ME,
-                                        group="nogroup-in-test")]
+                                        group=RUN_GROUP)]
     steps = {s["id"]: s for s in setup.apply(cfg, paths, root=root, runner=rec, steps=plan_steps)}
     assert steps["zram"]["status"] == "failed" and "no device name" in steps["zram"]["detail"]
     assert not any(c[0] in ("mkswap", "swapon") for c in rec.calls)        # nothing ran against a made-up device

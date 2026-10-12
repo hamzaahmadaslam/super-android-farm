@@ -18,7 +18,8 @@ def fake_mem(tmp_path, total_gb, available_gb=None, zram=False, swap_gb=8):
 
 
 NVIDIA = GpuInfo("/dev/dri/renderD129", "nvidia", "nvidia", "Big card", "0000:01:00.0", ["nvidia"], True, 16376)
-INTEL = GpuInfo("/dev/dri/renderD128", "i915", "intel", "Integrated", "0000:00:02.0", ["intel"], False, 0)
+INTEL = GpuInfo("/dev/dri/renderD128", "i915", "intel", "Integrated", "0000:00:02.0", ["intel"], False, None)
+RESERVE = 3072          # performance.reserve_host_mb: what the estimate leaves to the host by default
 
 
 def test_constants_are_the_measured_numbers():
@@ -52,8 +53,8 @@ def test_ram_binds_on_a_32gb_nvidia_machine(tmp_path):
     e = capacity.estimate(Config(), [INTEL, NVIDIA], root=root, cpu_threads=32)
     assert e["mode"] == "nvidia" and e["binding"] == "ram"
     ram = e["limits"]["ram"]
-    assert ram["per_android_mb"] == 1130 and ram["host_reserve_mb"] == 4096
-    assert ram["max"] == (32 * 1024 - 4096) // 1130 == e["max_instances"]
+    assert ram["per_android_mb"] == 1130 and ram["host_reserve_mb"] == RESERVE
+    assert ram["max"] == (32 * 1024 - RESERVE) // 1130 == e["max_instances"]
     assert e["limits"]["cpu"]["max"] == int(32 * 100 * 0.8 // 66)
     assert e["limits"]["vram"]["max"] == (16376 - 1536) // 360 and e["limits"]["vram"]["measured"] is True
     assert "max_idle_with_zram" not in ram            # no zram on this fake machine
@@ -86,12 +87,32 @@ def test_auto_mode_picks_the_best_card_present(tmp_path):
     assert capacity.estimate(Config(), [INTEL, amd], root=root, cpu_threads=8)["mode"] == "amd"
 
 
+def test_host_reserve_is_the_configured_value(tmp_path):
+    root = fake_mem(tmp_path, 32, 30)
+    lean = Config.model_validate({"performance": {"reserve_host_mb": 1024}})
+    desktop = Config.model_validate({"performance": {"reserve_host_mb": 10240}})
+    a = capacity.estimate(lean, [INTEL], root=root, cpu_threads=256)
+    b = capacity.estimate(desktop, [INTEL], root=root, cpu_threads=256)
+    assert a["limits"]["ram"]["host_reserve_mb"] == 1024 and a["limits"]["ram"]["max"] == (32 * 1024 - 1024) // 830
+    assert b["limits"]["ram"]["host_reserve_mb"] == 10240 and b["limits"]["ram"]["max"] == (32 * 1024 - 10240) // 830
+
+
+def test_farm_default_by_kind_resolves_to_a_vendor(tmp_path):
+    root = fake_mem(tmp_path, 64)
+    for gpu_cfg, mode in (({"mode": "igpu"}, "intel"), ({"mode": "dgpu"}, "nvidia"), ({"prefer": "igpu"}, "intel"),
+                          ({}, "nvidia")):
+        cfg = Config.model_validate({"gpu": gpu_cfg})
+        assert capacity.estimate(cfg, [INTEL, NVIDIA], root=root, cpu_threads=8)["mode"] == mode
+    only_intel = capacity.estimate(Config.model_validate({"gpu": {"mode": "dgpu"}}), [INTEL], root=root, cpu_threads=8)
+    assert only_intel["mode"] == "software"          # nothing can serve it; the estimate must still be a number
+
+
 def test_vram_binds_on_a_small_card(tmp_path):
     small = GpuInfo("/dev/dri/renderD129", "nvidia", "nvidia", "Small", "0000:01:00.0", ["nvidia"], True, 2048)
     e = capacity.estimate(Config(), [small], root=fake_mem(tmp_path, 256), cpu_threads=128)
     assert e["binding"] == "vram" and e["max_instances"] == (2048 - 1536) // 360
     assert any("Video memory is the limit" in a for a in e["advice"])
-    unknown = GpuInfo("/dev/dri/renderD129", "nvidia", "nvidia", "Unknown", "0000:01:00.0", ["nvidia"], True, 0)
+    unknown = GpuInfo("/dev/dri/renderD129", "nvidia", "nvidia", "Unknown", "0000:01:00.0", ["nvidia"], True, None)
     assert "vram" not in capacity.estimate(Config(), [unknown], root=tmp_path, cpu_threads=8)["limits"]
 
 
@@ -134,7 +155,7 @@ def test_zram_raises_the_idle_figure_but_not_the_binding_one(tmp_path):
     assert capacity.zram_size_mb(root) == 16383
     e = capacity.estimate(Config(), [NVIDIA], root=root, cpu_threads=32)
     ram = e["limits"]["ram"]
-    plain = (32 * 1024 - 4096) // 1130
+    plain = (32 * 1024 - RESERVE) // 1130
     assert ram["max"] == plain == e["max_instances"]              # video was not measured with zram: unchanged
     assert ram["max_idle_with_zram"] > plain and ram["zram_mb"] == 16383
     assert ram["max_idle_with_zram"] >= capacity.ZRAM_MEASURED_ANDROIDS      # 17 really ran on this configuration

@@ -16,11 +16,12 @@ from ..config import Config
 from ..core.docker import Docker
 from ..core.models import NET_IMAGE, Resolved
 from ..core.store import Store
-from ..paths import REPO_DIR, Paths
+from ..paths import Paths
+from ..resources import resource_path
 from ..util.proc import CommandError
 from . import killswitch, vpn
 
-NET_CONTEXT = REPO_DIR / "deploy" / "docker" / "net"
+NET_CONTEXT = resource_path("deploy", "docker", "net")
 CONTEXT_FILES = ("Dockerfile", "entrypoint.sh", "killswitch.sh", "routesync.sh", "healthcheck.sh")
 TUN_DEVICE = "/dev/net/tun"
 

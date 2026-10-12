@@ -24,7 +24,7 @@
 #   /etc/pki/akmods/private/private_key.priv + /etc/pki/akmods/certs/public_key.der   Fedora / RHEL (akmods)
 #   /var/lib/superfarm/mok/MOK.{priv,der}               created by --create-key
 #
-# Nothing here loads a module. Loading is done by `sudo sf host apply`.
+# Nothing here loads a module. Loading is done by `sf host apply`.
 set -euo pipefail
 
 KEY=""; CERT=""; KREL=$(uname -r); CREATE=0; ENROLL=0; STATUS=0
@@ -135,7 +135,7 @@ refused. Enrol it once:
        Enroll MOK -> Continue -> Yes -> type the password from step 1 -> Reboot
   3. Back in the system, check:   mokutil --test-key $CERT
        it must say "is already enrolled"
-  4. Run this script again to sign, then:   sudo sf host apply
+  4. Run this script again to sign, then:   sf host apply
 
 If the blue screen never appears, the firmware skipped it (fast boot): run step 1 again
 and reboot from the firmware's boot menu. Without mokutil: install the "mokutil" package.
@@ -297,4 +297,4 @@ if [ "$SB" = on ]; then
     note "mokutil is not installed, so enrolment could not be checked. If the module is refused at load time, the key is not enrolled."
   fi
 fi
-note "Done. Load it with:  sudo sf host apply    (repeat the signing after every kernel update)"
+note "Done. Load it with:  sf host apply    (repeat the signing after every kernel update)"

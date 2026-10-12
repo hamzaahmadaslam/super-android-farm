@@ -307,3 +307,26 @@ def test_remembered_pinning_is_checked_against_machine_and_policy():
     assert not cpuset_fits("30-31", t, "spread")           # cores this machine does not have
     assert not cpuset_fits("", t, "spread") and not cpuset_fits("0-1", t, "none")
     assert not cpuset_fits("zz", t, "spread")
+
+
+def test_an_image_with_its_own_frame_rate_property_gets_the_rate_under_that_name_too():
+    """Measured on an image with a patched compositor: `androidboot.redroid_fps=15` alone
+    left the screen at the image's built-in 25 Hz; the image's own property made it 15 Hz."""
+    config = Config.model_validate({"android": {"fps": 20, "images": {
+        "13": {"base": "example/android:13", "fps_property": "ro.vendor.example_fps"}}}})
+
+    def args(**spec):
+        return boot_arguments(resolve(InstanceSpec(id=1, **spec), config), FakeGpu())
+
+    assert "ro.vendor.example_fps=20" in args() and "androidboot.redroid_fps=20" in args()
+    per_android = args(fps=15)
+    assert "ro.vendor.example_fps=15" in per_android and "androidboot.redroid_fps=15" in per_android
+    # set by hand for one Android, the same key still wins
+    assert "ro.vendor.example_fps=30" in args(fps=15, extra_boot_args=["ro.vendor.example_fps=30"])
+    assert "ro.vendor.example_fps=15" not in args(fps=15, extra_boot_args=["ro.vendor.example_fps=30"])
+    # an exact image named on the Android bypasses android.images, and with it this setting
+    assert not [a for a in args(image="other/android:13") if a.startswith("ro.vendor.")]
+    stock = Config.model_validate({"android": {"images": {"13": {"base": "example/android:13"}}}})
+    assert not [a for a in boot_arguments(resolve(InstanceSpec(id=1), stock), FakeGpu()) if a.startswith("ro.vendor.")]
+    with pytest.raises(ValueError):
+        Config.model_validate({"android": {"images": {"13": {"base": "x/y:13", "fps_property": "bad name=1"}}}})

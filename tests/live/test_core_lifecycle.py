@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 import pytest
 
 from superfarm.config import Config
-from superfarm.core.backup import Backups
 from superfarm.core.docker import Docker
 from superfarm.core.instances import InstanceManager, mem_available_mb
 from superfarm.core.store import Store
@@ -85,6 +84,8 @@ def farm(tmp_path):
         "android": {"images": {"13": {"base": IMAGE, "tag": IMAGE}, BUILD_VERSION: {"base": IMAGE}}},
         "device": {"profile": "samsung-s23", "timezone": "Europe/Berlin"},
         "performance": {"boot_timeout": 240, "memory_guard_mb": 2500},
+        # Safety backups before a delete have their own scenario in test_e2e_farm.py.
+        "backup": {"auto_before_risky": False},
     })
     paths = Paths(tmp_path / "home").ensure()
     tasks = TaskManager(workers=2)
@@ -93,7 +94,6 @@ def farm(tmp_path):
     b = mgr.backends
     b.gpu_choose = lambda r, config, paths, *, counts=None: SoftwareGpu()
     b.sidecar_run_args = offline_sidecar
-    b.net_ensure_image = lambda docker: HELPER_BASE
     b.net_wait_ready = lambda docker, r, timeout=90: {"ready": docker.running(r.names.net), "state": "up", "detail": ""}
     b.net_status = lambda docker, r: {"state": "offline (test)"}
     try:
@@ -163,13 +163,15 @@ def test_lifecycle(farm: InstanceManager):
     assert "52.52" in docker.exec(names.android, ["dumpsys", "location"], timeout=30).stdout
 
     # ---- backup: Android is stopped for the copy and started again
-    backups = Backups(mgr)
+    backups = mgr.backups
     archive = backups.create(1)
     assert docker.running(names.android)
     manifest = backups.manifest(archive)
-    assert manifest["consistent"] and manifest["size"] == archive.stat().st_size > 1_000_000
+    data = backups.data_file(archive)
+    assert manifest["consistent"] and manifest["files"][data.name]["size"] == data.stat().st_size > 1_000_000
+    assert sorted(p.name for p in archive.iterdir()) == sorted([data.name, "instance.yaml", "manifest.json"])
     assert backups.verify(archive, deep=True)
-    assert [b["name"] for b in backups.list()] == [archive.name]
+    assert [b["dir"] for b in backups.list()] == [str(archive)]
 
     # ---- a changed renderer clears compiled shader caches (checked on the stopped volume)
     mgr.stop(1)
@@ -193,8 +195,10 @@ def test_lifecycle(farm: InstanceManager):
     assert mgr.adb(new_id).shell(["cat", "/data/local/tmp/keep.txt"]) == "kept-across-restarts"
     assert mgr.adb(new_id).setting_get("secure", "android_id") == spec.device.android_id
     assert "com.android.egg" in mgr.adb(new_id).shell("pm list packages -d")
+    with pytest.raises(Exception, match="replaces everything that Android holds now"):
+        backups.restore(archive, new_id)                   # over an existing Android: only with force
     with pytest.raises(Exception, match="never restored over a running Android"):
-        backups.restore(archive, new_id)
+        backups.restore(archive, new_id, force=True)       # and never while it runs
     mgr.stop(new_id)
 
     # ---- clone with data: a third volume with the same content, a new identity

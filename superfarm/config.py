@@ -58,6 +58,7 @@ class AndroidImage(_Model):
     base: str = Field(..., description="Upstream image this Android version starts from.")
     tag: str = Field("", description="Use this exact local image instead of building one from `base` (for an image you built or imported yourself).")
     arm_translation: bool = Field(True, description="Whether the image is expected to run ARM-only apps (native bridge present).")
+    fps_property: str = Field("", pattern=r"^([A-Za-z0-9_.\-]{1,90})?$", description="Extra boot property that carries the frame rate, for an image whose compositor does not read the standard `androidboot.redroid_fps` (a patched build that takes its rate from a property of its own). The frame rate of every Android on this image is then passed under this name as well. Empty = the standard argument only.")
 
 
 def _default_images() -> dict[str, AndroidImage]:
@@ -122,9 +123,9 @@ class VpnConfig(_Model):
 
 
 class GatewayConfig(_Model):
-    provider: VpnProvider = Field("openvpn")
+    provider: VpnProvider = Field("openvpn", description="VPN software this gateway runs.")
     profile: str = Field(..., description="VPN profile this gateway connects with.")
-    credentials: str = Field("default")
+    credentials: str = Field("default", description="Name of the credentials entry in secrets/ this gateway logs in with.")
     subnet: str = Field("", description="Private /24 for Androids behind this gateway. Empty = taken from docker.subnet_pool.")
 
 
@@ -195,11 +196,11 @@ class CameraConfig(_Model):
     device_base: int = Field(100, ge=10, le=200, description="Android N's camera is /dev/video(device_base + N) on the host, for N from 1 to `slots` (the devices host setup creates). An Android with any other id is given a free device from that pool.")
     width: int = Field(640, description="Sensor frame width (landscape).")
     height: int = Field(360, description="Sensor frame height.")
-    fps: int = Field(20, ge=5, le=60)
+    fps: int = Field(20, ge=5, le=60, description="Frames per second of the camera feed.")
     quality: int = Field(5, ge=2, le=31, description="MJPEG quantiser; lower is better and larger.")
     mirror: bool = Field(True, description="Flip the picture horizontally. On by default: apps mirror a front camera, and in a live broadcast test viewers (and the broadcaster's preview) saw the source the right way round only with this on. Turn it off if text in your source appears reversed.")
     rtmp_bind: str = Field("127.0.0.1", description="Address the RTMP ingest listens on for live sources (OBS).")
-    rtmp_port: int = Field(1935, ge=1024, le=65535)
+    rtmp_port: int = Field(1935, ge=1024, le=65535, description="Port the RTMP ingest listens on.")
     hal_overlay: str = Field("", description="Folder with the camera/microphone HAL files copied into /vendor. Empty = <home>/overlays/camera/<android version>.")
 
 
@@ -218,9 +219,9 @@ class LlmConfig(_Model):
     base_url: str = Field("http://127.0.0.1:11434", description="Model server address.")
     model: str = Field("", description="Model name. Empty = first one the server lists.")
     api_key_secret: str = Field("llm", description="Name of the secret holding the API key (openai provider).")
-    timeout: int = Field(120, ge=5)
-    temperature: float = Field(0.1, ge=0, le=2)
-    num_ctx: int = Field(8192, ge=1024)
+    timeout: int = Field(120, ge=5, description="Seconds to wait for one answer from the model server.")
+    temperature: float = Field(0.1, ge=0, le=2, description="Sampling temperature sent to the model. Low values keep answers repeatable.")
+    num_ctx: int = Field(8192, ge=1024, description="Context window in tokens requested from the model (ollama provider).")
 
 
 class AutomationConfig(_Model):
@@ -240,14 +241,24 @@ class AutomationConfig(_Model):
 
 class BackupConfig(_Model):
     dir: str = Field("", description="Where backups go. Empty = <home>/backups.")
-    compression: Literal["zstd", "gzip", "none"] = Field("zstd")
-    level: int = Field(3, ge=1, le=19)
+    compression: Literal["zstd", "gzip", "none"] = Field("zstd", description="How the data archive of a backup is compressed. none: a plain tar.")
+    level: int = Field(3, ge=1, le=19, description="Compression level: 1 is fastest, higher is smaller and slower. gzip stops at 9.")
     keep: int = Field(7, ge=0, description="Backups kept per Android by `sf backup prune`. 0 = keep all.")
     stop_for_backup: bool = Field(True, description="Stop a running Android while its data is copied, for a consistent snapshot, then start it again.")
     auto_before_risky: bool = Field(True, description="Take a backup automatically before an operation that can lose data (delete, forced Android version change, restore over an existing Android). If that backup fails, the operation is refused unless forced.")
     schedule: str = Field("", description="Recurring backups as a cron line `minute hour day-of-month month day-of-week` (e.g. `0 4 * * *` = every day at 04:00). Empty = off.")
     schedule_selector: str = Field("all", description="Which Androids the scheduled backup covers.")
     include_secrets: bool = Field(False, description="Include VPN credentials and tokens in farm backups. Off by default so a backup can be stored or shared without leaking them.")
+
+    @field_validator("schedule")
+    @classmethod
+    def _cron(cls, v: str) -> str:
+        if v.strip():
+            # Imported here: the parser lives with the automation schedules (one cron dialect
+            # for the whole farm), and that package builds on this module.
+            from .automation.schedule import parse_cron
+            parse_cron(v)          # ValueError says which field is wrong
+        return v.strip()
 
 
 class ControlConfig(_Model):
@@ -261,7 +272,7 @@ class ControlConfig(_Model):
 
 
 class LoggingConfig(_Model):
-    level: Literal["debug", "info", "warning", "error"] = Field("info")
+    level: Literal["debug", "info", "warning", "error"] = Field("info", description="Least severe kind of message the daemon writes to its log.")
     max_mb: int = Field(20, ge=1, description="Size at which a log file rotates.")
     keep: int = Field(5, ge=1, description="Rotated files kept.")
 

@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from ..config import Config
-from .gpu import GpuInfo
+from .gpu import GpuInfo, planned_mode
 
 # ----------------------------------------------------------------- measured: memory
 # System RAM one booted Android costs. Source: relay memory test, 927-944 MB per Android
@@ -23,11 +23,10 @@ RAM_PER_ANDROID_MB = 1000
 RAM_NVIDIA_EXTRA_MB = 300
 # Saved per Android by disabling the 38 unused system packages (1,079 -> 908 MB).
 RAM_TRIM_SAVING_MB = 170
-# What a lean host (kernel, Docker, the daemon) needs for itself. Not a measurement of the
-# reference machine: its full desktop session with browsers used close to 10 GB before any
-# Android started, which is why "13 in a live video" was its ceiling on 32 GB.
-HOST_RESERVE_MB = 4096
-HOST_RESERVE_FRACTION = 0.10
+# What the host needs for itself (kernel, Docker, the daemon, a desktop) is a setting,
+# performance.reserve_host_mb, not a measurement: the reference machine's full desktop
+# session with browsers used close to 10 GB before any Android started, which is why
+# "13 in a live video" was its ceiling on 32 GB.
 
 # ----------------------------------------------------------------- measured: CPU
 # Percent of one CPU thread per Android. "light" = scrolling a settings screen (13 Androids);
@@ -126,14 +125,10 @@ def per_android_ram_mb(mode: str, *, trimmed: bool, limit_mb: int = 0) -> int:
 
 
 def _best_mode(config: Config, gpus: list[GpuInfo]) -> str:
-    """The mode `auto` would aim for, judged from the cards alone (no file checks: this is
-    a planning figure, the doctor reports whether the NVIDIA runtime is actually built)."""
-    if config.gpu.mode != "auto":
-        return config.gpu.mode
-    for vendor in ("nvidia", "amd", "intel"):
-        if any(vendor in g.usable_modes for g in gpus):
-            return vendor
-    return "software"
+    """The concrete backend the farm's default mode aims for, judged from the cards alone
+    (no file checks: this is a planning figure, the doctor reports whether the NVIDIA
+    runtime is actually built). auto / igpu / dgpu are resolved to a vendor here."""
+    return planned_mode(config, gpus)
 
 
 def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", root: Path | str = "/",
@@ -156,7 +151,7 @@ def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", ro
     mode = _best_mode(config, gpus)
     trimmed = config.performance.trim_packages
     per_ram = per_android_ram_mb(mode, trimmed=trimmed, limit_mb=config.resources.memory_mb)
-    reserve = max(HOST_RESERVE_MB, int(total * HOST_RESERVE_FRACTION))
+    reserve = config.performance.reserve_host_mb
     zram = zram_active(root)
 
     by_ram = max(0, (total - reserve) // per_ram) if total else 0
@@ -226,7 +221,7 @@ def _advice(config: Config, gpus: list[GpuInfo], est: dict) -> list[str]:
             out.append(f"Turn on performance.trim_packages: about {RAM_TRIM_SAVING_MB} MB less per Android "
                        f"(+{gain} Androids here) and no Bluetooth crash loop at boot.")
         if not est["zram_active"] and not config.performance.zram.enabled:
-            out.append("Enable compressed swap (performance.zram.enabled: true, then `sudo sf host apply`). "
+            out.append("Enable compressed swap (performance.zram.enabled: true, then `sf host apply`). "
                        f"Measured on a 32 GB desktop: {ZRAM_MEASURED_ANDROIDS} idle Androids ran healthy where "
                        f"about 13 fit before, with idle memory compressing {ZRAM_RATIO}-5.1 : 1. That run used "
                        f"vm.swappiness={ZRAM_SWAPPINESS} (performance.swappiness). Live video was not measured "

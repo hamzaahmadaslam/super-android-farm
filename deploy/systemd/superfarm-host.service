@@ -3,10 +3,15 @@
 # Re-establishes what a reboot throws away: kernel modules (loaded by name, because module
 # auto-loading cannot be relied on), binder, compressed swap, same-page merging, the
 # virtual camera devices and the /run/superfarm folders with the farm group as owner.
-# Nothing here writes configuration; that is done once by `sudo sf host apply`.
+# Nothing here writes configuration; that is done once by `sf host apply`, which also
+# installs this unit.
 #
 # This is the same code as `sf host apply --boot`, called through the module so the unit
 # keeps working whatever the command-line front end looks like.
+#
+# The daemon is not a system unit: it is the desktop user's own service, installed with
+# `sf service install`, so nothing here orders against it. It needs the /run/superfarm
+# folders this unit creates only when the first NVIDIA or camera Android starts.
 #
 # Security note: root runs Python from the farm user's virtual environment and reads that
 # user's config.yaml. The farm user is a member of the docker group, which already equals
@@ -16,7 +21,7 @@
 [Unit]
 Description=Super Farm host preparation (modules, limits, cameras, runtime folders)
 After=local-fs.target systemd-modules-load.service systemd-sysctl.service systemd-tmpfiles-setup.service
-Before=docker.service superfarm.service
+Before=docker.service
 # The farm may live on a drive that is not mounted at boot; skip quietly in that case.
 ConditionPathExists=@PYTHON@
 

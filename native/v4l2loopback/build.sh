@@ -19,7 +19,7 @@
 # With Secure Boot the installed module must also be signed before it loads:
 #   sudo scripts/host/sign-module.sh v4l2loopback
 #
-# This script never loads or unloads a module. `sudo sf host apply` does the loading.
+# This script never loads or unloads a module. `sf host apply` does the loading.
 # v4l2loopback and the patch in this folder are GPL-2.0-or-later (see COPYING and README.md).
 set -euo pipefail
 
@@ -141,7 +141,7 @@ step_install() {
   echo "installed: $(modinfo -k "$KREL" -n v4l2loopback 2>/dev/null || echo 'module (path unknown)') and /usr/local/bin/v4l2loopback-ctl"
   sb_note
   echo
-  echo "Next: sudo sf host apply     (loads the module and creates the camera devices)"
+  echo "Next: sf host apply     (loads the module and creates the camera devices)"
 }
 
 step_dkms() {
@@ -173,7 +173,7 @@ step_dkms() {
 DKMS rebuilds the module at every kernel update. Under Secure Boot DKMS signs it with its own
 key (usually /var/lib/dkms/mok.pub, on Debian/Ubuntu /var/lib/shim-signed/mok/MOK.der); that key
 must be enrolled once:   sudo scripts/host/sign-module.sh --status     shows whether it is.
-Next: sudo sf host apply
+Next: sf host apply
 EOF
 }
 

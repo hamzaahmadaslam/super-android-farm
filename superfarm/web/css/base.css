@@ -1,0 +1,128 @@
+/* Tokens, reset and typography. Colours live in custom properties so the two themes
+   differ in one place; the theme follows the system unless the operator picked one. */
+
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef0f3;
+  --border: #d5d9e0;
+  --text: #1b2330;
+  --muted: #5d6878;
+  --accent: #0f766e;
+  --accent-text: #ffffff;
+  --accent-soft: #d6efec;
+  --ok: #18794e;
+  --ok-soft: #ddf3e4;
+  --warn: #9a6200;
+  --warn-soft: #fdf0cf;
+  --fail: #c62a2f;
+  --fail-soft: #fde4e4;
+  --info: #1d5fbf;
+  --info-soft: #e0ebfb;
+  --focus: #2563eb;
+  --shadow: 0 1px 2px rgb(0 0 0 / 8%), 0 4px 16px rgb(0 0 0 / 8%);
+  --radius: 6px;
+  --gap: 12px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151a;
+    --surface: #1a1e25;
+    --surface-2: #232830;
+    --border: #343b46;
+    --text: #e3e7ee;
+    --muted: #98a2b3;
+    --accent: #2bb3a6;
+    --accent-text: #06201d;
+    --accent-soft: #143b38;
+    --ok: #4cc38a;
+    --ok-soft: #153226;
+    --warn: #f1b434;
+    --warn-soft: #3a2e10;
+    --fail: #ff7b7f;
+    --fail-soft: #41191b;
+    --info: #74a8ff;
+    --info-soft: #16294a;
+    --focus: #8ab4ff;
+    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 20px rgb(0 0 0 / 40%);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #12151a;
+  --surface: #1a1e25;
+  --surface-2: #232830;
+  --border: #343b46;
+  --text: #e3e7ee;
+  --muted: #98a2b3;
+  --accent: #2bb3a6;
+  --accent-text: #06201d;
+  --accent-soft: #143b38;
+  --ok: #4cc38a;
+  --ok-soft: #153226;
+  --warn: #f1b434;
+  --warn-soft: #3a2e10;
+  --fail: #ff7b7f;
+  --fail-soft: #41191b;
+  --info: #74a8ff;
+  --info-soft: #16294a;
+  --focus: #8ab4ff;
+  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 20px rgb(0 0 0 / 40%);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { font-size: 14px; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  line-height: 1.45;
+  -webkit-text-size-adjust: 100%;
+}
+
+h1, h2, h3, h4, p, ul, ol, dl, dd, figure, pre { margin: 0; }
+h1 { font-size: 1.35rem; font-weight: 600; }
+h2 { font-size: 1.05rem; font-weight: 600; }
+h3 { font-size: .95rem; font-weight: 600; }
+ul, ol { padding-left: 1.3em; }
+a { color: var(--accent); }
+img, canvas { max-width: 100%; }
+code, pre, kbd, .mono { font-family: var(--mono); font-size: .92em; }
+code { background: var(--surface-2); padding: 1px 4px; border-radius: 4px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+[hidden] { display: none !important; }
+
+/* One focus style everywhere; never removed, only shown for keyboard use. */
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+:focus:not(:focus-visible) { outline: none; }
+
+.muted { color: var(--muted); }
+.small { font-size: .88rem; }
+.nowrap { white-space: nowrap; }
+.right { text-align: right; }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.fail { color: var(--fail); }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
+.skip-link { position: absolute; left: 8px; top: -48px; z-index: 100; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.skip-link:focus { top: 8px; }
+
+.noscript { margin: 40px auto; max-width: 480px; padding: 16px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

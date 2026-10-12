@@ -158,7 +158,7 @@ def test_ensure_relay_reports_unwritable_socket_dir(env, monkeypatch):
     (tmp / "blocker").write_text("a file where a folder is needed")
     cfg = Config.model_validate({"gpu": {"nvidia": {"socket_dir": str(tmp / "blocker" / "venus"), "icd": str(tmp / "icd.json")}}})
     monkeypatch.setattr(venus.os, "access", lambda p, m: True)
-    with pytest.raises(venus.RelayError, match="sudo sf host apply"):
+    with pytest.raises(venus.RelayError, match="run `sf host apply` once"):
         venus.ensure_relay(cfg, paths, NODE)
 
 

@@ -17,7 +17,7 @@ Rules this module exists to enforce (each one was learned the hard way):
   whole command line by substring (`pkill -f`) also matches the caller's own shell.
 * The relay runs as the desktop user. The card needs no root.
 
-Sources, patches and the build script live in native/venus/.
+Sources, patches and the build script ship in native/venus/ (see superfarm.resources).
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..paths import Paths
+from ..resources import resource_path
 from ..util import proc
 from ..util.files import locked
 
@@ -47,7 +48,8 @@ RELAY_BINARY = "bin/virgl_test_server"
 RELAY_HELPER = "libexec/virgl_render_server"
 RELAY_LIBRARY = "libvirglrenderer.so.1"
 RELAY_COMM = "virgl_test_serv"           # "virgl_test_server" cut to the kernel's 15 characters
-BUILD_HINT = "build it with native/venus/build.sh (see native/venus/README.md)"
+BUILD_HINT = (f"build it with `{resource_path('native', 'venus', 'build.sh')} all` "
+              "(see README.md next to it)")
 
 _NODE = re.compile(r"^/dev/dri/(renderD\d+)$")
 # Children this process started, kept so they are reaped instead of lingering as zombies.
@@ -231,7 +233,7 @@ def ensure_relay(config: Config, paths: Paths, node: str, *, timeout: float = 10
         sdir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise RelayError(
-            f"cannot create {sdir} ({e.strerror}); run `sudo sf host apply` once (it creates "
+            f"cannot create {sdir} ({e.strerror}); run `sf host apply` once (it creates "
             f"{config.gpu.nvidia.socket_dir} for the farm user), or set gpu.nvidia.socket_dir to a folder you own"
         ) from None
 

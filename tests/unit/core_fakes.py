@@ -34,7 +34,9 @@ def labels_of(args: list[str]) -> dict[str, str]:
 
 
 class FakeDocker:
-    binary = "docker"
+    # Not the real CLI: code that starts a child process itself (the backup helper) must fail
+    # here instead of reaching the Docker daemon of the machine the tests run on.
+    binary = "docker-is-not-used-in-unit-tests"
 
     def __init__(self) -> None:
         self.containers: dict[str, dict] = {}
@@ -265,6 +267,8 @@ class Farm:
         FakeAdb.registry = {}
         base = {"docker": {"name_prefix": PREFIX}, "network": {"adb_port_base": 17000},
                 "performance": {"start_stagger_seconds": 0},
+                # Off unless a test is about it: a safety backup runs a helper container.
+                "backup": {"auto_before_risky": False},
                 "android": {"images": {"13": {"base": "example/android:13", "tag": "local/android:13"}}}}
         self.config = Config.model_validate(_merge(base, config or {}))
         self.paths = Paths(tmp_path / "home").ensure()
@@ -276,12 +280,12 @@ class Farm:
         self.gpu = FakeGpu()
         self.net_ready = {"ready": True, "state": "connected", "detail": ""}
         self.mem_mb = 16000
+        self.capacity_max = 20                     # what the fake estimate says this machine holds
         self.events: list[str] = []
         b = self.mgr.backends
         b.gpu_choose = self._choose
-        b.ensure_relay = lambda config, paths, node: self.events.append(f"relay:{node}") or "/run/venus/renderD129"
-        b.gateway_ensure = lambda docker, config, paths, name: self.events.append(f"gateway:{name}") or {}
-        b.net_ensure_image = lambda docker: self.events.append("net-image") or "superfarm/net"
+        b.capacity_estimate = lambda config, running: {
+            "max_instances": self.capacity_max, "binding": "ram", "advice": ["add RAM"], "running_seen": running}
         b.sidecar_run_args = fake_sidecar_args
         b.net_wait_ready = lambda docker, r, timeout=90: (self.events.append("net-wait"), self.net_ready)[1]
         b.net_status = lambda docker, r: {"mode": r.net_mode, "state": "connected", "public_ip": "198.51.100.7"}

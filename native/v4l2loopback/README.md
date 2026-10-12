@@ -27,7 +27,7 @@ The patch is exactly `git diff` of the tree the reference farm runs, against ups
 ```bash
 native/v4l2loopback/build.sh build            # as your user: fetch, patch, compile
 sudo native/v4l2loopback/build.sh install     # install for the running kernel + v4l2loopback-ctl
-sudo sf host apply                            # load it and create the camera devices
+sf host apply                            # load it and create the camera devices
 ```
 
 Needs the kernel headers and a compiler (`sf doctor` prints the exact package names for your

@@ -8,6 +8,10 @@ this local image" and nothing is built.
 
 The helper image ("tools") is what works on a data volume while its Android is stopped:
 backups, restores, clones, cache clearing.
+
+A farm may mix Android versions freely, but two features are native code built against one
+release and exist for that release only (VERSION_BOUND). status() says so per version, so
+the panel can show "not available on Android 12" instead of an Android that dies at boot.
 """
 from __future__ import annotations
 
@@ -22,7 +26,8 @@ import threading
 from pathlib import Path
 
 from ..config import Config
-from ..paths import REPO_DIR, Paths
+from ..paths import Paths
+from ..resources import resource_path
 from ..util.proc import CommandError
 from .docker import Docker
 from .models import image_tag
@@ -33,10 +38,16 @@ TOOLS_BASE = "alpine:3.22"
 LABEL_OVERLAY = "io.superfarm.overlay"
 LABEL_BASE_ID = "io.superfarm.base-id"
 
+# Feature -> Android releases it is built for. Both are binaries compiled against Android 13
+# (API 33): the camera/microphone HAL taken from an Android 13 build, and the Venus Vulkan
+# driver + gralloc that NVIDIA rendering needs.
+VERSION_BOUND: dict[str, tuple[str, ...]] = {"camera": ("13",), "nvidia": ("13",)}
+_FEATURE_NAME = {"camera": "the virtual camera and microphone", "nvidia": "NVIDIA rendering"}
+
 _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,31}$")
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-/:@]{0,254}$")
 
-DOCKERFILE_DIR = REPO_DIR / "deploy" / "docker" / "android"
+DOCKERFILE_DIR = resource_path("deploy", "docker", "android")
 # The same instructions as deploy/docker/android/Dockerfile*, for installs that do not ship
 # the deploy/ folder (a wheel). A unit test keeps the two from drifting apart.
 ANDROID_DOCKERFILE = """\
@@ -158,20 +169,68 @@ class Images:
             return "base image changed"
         return ""
 
+    # ----------------------------------------------------------------- features
+    def _camera_missing(self, version: str) -> list[str]:
+        """Files of the camera HAL overlay that are absent for this version (same folder
+        and same list the camera module installs from)."""
+        from ..media.camera import OVERLAY_REQUIRED
+        configured = self.config.media.camera.hal_overlay
+        folder = Path(configured).expanduser() if configured else self.paths.overlays / "camera" / str(version)
+        return [str(folder / name) for name in OVERLAY_REQUIRED if not (folder / name).is_file()]
+
+    def _nvidia_missing(self) -> list[str]:
+        from ..host import venus
+        status = venus.runtime_status(self.config, self.paths)
+        return [] if status.get("ready") else [str(m) for m in status.get("missing") or ["the Venus runtime"]]
+
+    def feature(self, version: str, name: str, *, missing: list[str] | None = None) -> dict:
+        """Whether a version-bound feature can be used on one Android version.
+
+            supported    the feature exists for this Android release at all
+            available    supported, and its files are present on this machine
+            unsupported  "" or the sentence to show ("not available on Android 12 ...")
+            reason       "" when available, otherwise what is in the way
+        """
+        built_for = VERSION_BOUND[name]
+        major = _major(version)
+        unsupported = "" if major in built_for else (
+            f"not available on Android {version}: {_FEATURE_NAME[name]} is built for Android {'/'.join(built_for)} only")
+        if unsupported:
+            return {"supported": False, "available": False, "unsupported": unsupported, "reason": unsupported}
+        if missing is None:
+            try:
+                missing = self._camera_missing(version) if name == "camera" else self._nvidia_missing()
+            except Exception as e:  # noqa: BLE001 - a status line must not fail because a neighbour module did
+                missing = [f"could not be checked ({type(e).__name__}: {e})"]
+        hint = "native/camera/extract_hal.sh" if name == "camera" else "native/venus/build.sh"
+        reason = f"not built yet ({missing[0]} is missing{' and more' if len(missing) > 1 else ''}); see {hint}" if missing else ""
+        return {"supported": True, "available": not missing, "unsupported": "", "reason": reason}
+
     def status(self) -> list[dict]:
+        """One row per configured Android version: its images, its overlay, and which
+        version-bound features work on it."""
         out = []
+        try:
+            nvidia_missing: list[str] | None = self._nvidia_missing()
+        except Exception as e:  # noqa: BLE001 - see feature()
+            nvidia_missing = [f"could not be checked ({type(e).__name__}: {e})"]
         for version, entry in sorted(self.config.android.images.items(), key=lambda kv: _version_key(kv[0])):
             custom = bool(entry.tag)
             tag = entry.tag or image_tag(self.config.docker.name_prefix, version)
             built = self.docker.image_exists(tag)
             files = [] if custom or not _VERSION.match(version) else self.overlay_files(version)
             stale = "" if custom or not built else self._stale(version, tag, entry.base)
+            features = {"camera": self.feature(version, "camera"),
+                        "nvidia": self.feature(version, "nvidia", missing=nvidia_missing)}
             out.append({
                 "version": version, "base": entry.base, "tag": tag, "custom": custom, "built": built,
                 "base_present": self.docker.image_exists(entry.base),
                 "overlay_dir": "" if custom else str(self.overlay_dir(version)) if _VERSION.match(version) else "",
                 "overlays": files, "stale": bool(stale), "stale_reason": stale,
                 "arm_translation": entry.arm_translation,
+                "overlays_available": {"camera_hal": features["camera"]["available"],
+                                       "nvidia_runtime": features["nvidia"]["available"]},
+                "features": features,
             })
         return out
 
@@ -273,6 +332,12 @@ class Images:
                 if self.docker.image_exists(ref):
                     return ref
         return self.build_tools(task)
+
+
+def _major(version: str) -> str:
+    """`13` for `13`, `13.0` or `13-custom`; "" for a name that does not start with a number."""
+    m = re.match(r"\d+", str(version))
+    return m.group() if m else ""
 
 
 def _version_key(version: str) -> tuple:

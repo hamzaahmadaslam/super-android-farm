@@ -10,9 +10,11 @@ installer is built from the tables below so it is the exact command for *this* m
     arch      Arch, Manjaro, EndeavourOS                      pacman
     suse      openSUSE Leap / Tumbleweed, SLES                zypper
 
-Package names for the Debian family were verified on Ubuntu 26.04. The other three
-columns come from each distribution's package index and have not been exercised by an
-install run here; a wrong name fails loudly at install time, it cannot do harm.
+Every name in the tables below is checked against the real package index of one release
+per family by tests/distro/run.sh (Ubuntu 24.04, Debian 12, Fedora 44, Arch, openSUSE
+Tumbleweed, each in a throwaway container): the required and optional sets are really
+installed there, the rest is resolved without installing. Not covered by that check: the
+kernel header packages (named after the running kernel) and the RHEL-family hints.
 """
 from __future__ import annotations
 
@@ -102,6 +104,8 @@ _HINTS: dict[tuple[str, str], str] = {
 }
 
 _VALID_PKG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._:-]*$")
+# Every abstract package key Distro.packages() understands.
+PACKAGE_KEYS: tuple[str, ...] = tuple(_PACKAGES)
 
 
 @dataclass(frozen=True)

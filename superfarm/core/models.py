@@ -197,6 +197,8 @@ def image_tag(prefix: str, version: str) -> str:
 def resolve(spec: InstanceSpec, config: Config) -> Resolved:
     """Merge one instance's overrides over the farm defaults."""
     version = spec.android_version or config.android.default_version
+    fps = spec.fps or config.android.fps
+    fps_args: list[str] = []
     if spec.image:
         image = base = spec.image
     else:
@@ -205,6 +207,9 @@ def resolve(spec: InstanceSpec, config: Config) -> Resolved:
         entry = config.android.images[version]
         base = entry.base
         image = entry.tag or image_tag(config.docker.name_prefix, version)
+        if entry.fps_property:
+            # First in the list: the same key in extra_boot_args, set by hand, still wins.
+            fps_args = [f"{entry.fps_property}={fps}"]
     names = Names(prefix=config.docker.name_prefix, id=spec.id)
     res, net = spec.resources, spec.network
     memory = res.memory_mb or config.resources.memory_mb
@@ -217,7 +222,7 @@ def resolve(spec: InstanceSpec, config: Config) -> Resolved:
         id=spec.id, name=spec.display_name, names=names, android_version=version, image=image, base_image=base,
         data_volume=spec.data_volume or names.volume,
         width=spec.width or config.android.width, height=spec.height or config.android.height,
-        dpi=spec.dpi or config.android.dpi, fps=spec.fps or config.android.fps,
+        dpi=spec.dpi or config.android.dpi, fps=fps,
         gpu_mode=spec.gpu_mode or config.gpu.mode, gpu_node=spec.gpu_node or config.gpu.render_node,
         cpus=res.cpus or config.resources.cpus, memory_mb=memory, memory_swap_mb=max(swap, memory) if swap else memory,
         memory_reservation_mb=config.resources.memory_reservation_mb, cpuset=res.cpuset or "",
@@ -229,7 +234,7 @@ def resolve(spec: InstanceSpec, config: Config) -> Resolved:
         allow_lan=config.network.allow_lan, dns=list(config.network.dns), ipv6=config.network.ipv6,
         adb_bind=config.network.adb_bind, adb_port=config.network.adb_port_base + spec.id,
         camera=config.media.camera.enabled if spec.camera is None else spec.camera,
-        device=spec.device, boot_args=[*config.android.extra_boot_args, *spec.extra_boot_args],
+        device=spec.device, boot_args=[*fps_args, *config.android.extra_boot_args, *spec.extra_boot_args],
         props={**config.android.extra_props, **spec.extra_props}, stop_timeout=config.docker.stop_timeout,
         log_max_size=config.docker.log_max_size, log_max_files=config.docker.log_max_files,
     )

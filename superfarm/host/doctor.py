@@ -24,8 +24,9 @@ from collections.abc import Callable, Mapping
 from ..config import Config
 from ..core.store import Store
 from ..paths import Paths
+from ..resources import resource_path
 from ..util import proc
-from . import capacity, distro as distro_mod, gpu as gpu_mod, modules, setup, venus
+from . import capacity, distro as distro_mod, gpu as gpu_mod, modules, service, setup, venus
 
 OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
 
@@ -38,6 +39,10 @@ LOOPBACK = ("127.0.0.1", "::1", "localhost")
 SECUREBOOT_VAR = "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 # Docker's built-in local pools: 172.17-172.31 as /16 (15) plus 192.168.0.0/16 cut into /20 (16).
 DOCKER_DEFAULT_NETWORKS = 31
+# Fix lines name commands exactly as the CLI spells them. `sf host apply` asks for sudo
+# itself (a plain `sudo sf` usually fails: sudo does not search a virtual environment).
+HOST_APPLY = "sf host apply"
+SIGN_MODULE = "sf host sign-module -- v4l2loopback"
 
 
 @dataclass
@@ -170,7 +175,7 @@ def check_binder(c: Ctx) -> Check:
     load = f"sudo modprobe binder_linux devices={modules.BINDER_DEVICES}"
     if b["how"] == "module-not-loaded":
         return Check("kernel.binder", title, FAIL, "binder_linux exists for this kernel but is not loaded",
-                     f"{load}\nsudo sf host apply    # makes it permanent")
+                     f"{load}\nsf host apply    # makes it permanent")
     if b["how"] == "binderfs-not-registered":
         return Check("kernel.binder", title, WARN, "binder is built into the kernel but binderfs is not registered",
                      "sudo mkdir -p /dev/binderfs && sudo mount -t binder binder /dev/binderfs")
@@ -199,7 +204,7 @@ def _module_check(c: Ctx, cid: str, title: str, names: list[str], fix_extra: str
         detail = f"installed but not loaded: {', '.join(idle)}" + (
             " (will load on demand)" if status == OK else "; auto-loading is off, so they never will be")
         return Check(cid, title, status, detail,
-                     "" if status == OK else f"sudo modprobe -a {' '.join(idle)}\nsudo sf host apply    # makes it permanent")
+                     "" if status == OK else f"sudo modprobe -a {' '.join(idle)}\nsf host apply    # makes it permanent")
     return Check(cid, title, OK, ", ".join(f"{n} ({s})" for n, s in states.items()))
 
 
@@ -232,11 +237,11 @@ def check_autoload(c: Ctx) -> Check:
         return Check("kernel.autoload", title, OK,
                      "off (/proc/sys/kernel/modprobe is empty), but every module the farm needs is loaded"
                      + ("" if conf else "; not yet made permanent"),
-                     "" if conf else "sudo sf host apply")
+                     "" if conf else "sf host apply")
     return Check("kernel.autoload", title, WARN,
                  "off (/proc/sys/kernel/modprobe is empty): nothing loads on demand. Present but not loaded "
                  f"(mostly what Android's own network service asks for): {', '.join(idle)}",
-                 f"sudo modprobe -a {' '.join(idle)}\nsudo sf host apply    # loads them at every boot")
+                 f"sudo modprobe -a {' '.join(idle)}\nsf host apply    # loads them at every boot")
 
 
 def check_ip_forward(c: Ctx) -> Check:
@@ -246,7 +251,7 @@ def check_ip_forward(c: Ctx) -> Check:
     if v == 1:
         return Check("kernel.ip_forward", "IP forwarding", OK, "on")
     return Check("kernel.ip_forward", "IP forwarding", FAIL, "off: containers cannot reach the network",
-                 "sudo sysctl -w net.ipv4.ip_forward=1\nsudo sf host apply    # makes it permanent")
+                 "sudo sysctl -w net.ipv4.ip_forward=1\nsf host apply    # makes it permanent")
 
 
 def check_cgroup(c: Ctx) -> Check:
@@ -412,7 +417,7 @@ def _sysctl_check(c: Ctx, cid: str, title: str, keys: list[str]) -> Check:
     if low:
         cmds = "\n".join(f"sudo sysctl -w {k.split('=')[0]}={floors[k.split('=')[0]].minimum}" for k in low)
         return Check(cid, title, WARN, "; ".join(low) + ". " + floors[keys[0]].why,
-                     cmds + "\nsudo sf host apply    # writes them to " + setup.SYSCTL_FILE)
+                     cmds + "\nsf host apply    # writes them to " + setup.SYSCTL_FILE)
     return Check(cid, title, OK, ", ".join(seen))
 
 
@@ -444,7 +449,7 @@ def check_ram(c: Ctx) -> Check:
     est = capacity.estimate(c.config, c.gpus(), root=c.root)
     detail = (f"{total / 1024:.1f} GB total, {mem.get('MemAvailable', 0) / 1024:.1f} GB available; room for about "
               f"{est['limits']['ram']['max']} Androids by memory ({est['limits']['ram']['per_android_mb']} MB each)")
-    need = c.config.resources.memory_mb + capacity.HOST_RESERVE_MB // 2
+    need = c.config.resources.memory_mb + c.config.performance.reserve_host_mb // 2
     if total < need:
         return Check("mem.ram", "Memory", FAIL, detail, f"At least {need // 1024 + 1} GB of RAM is needed for one Android.")
     if total < 8192:
@@ -462,10 +467,10 @@ def check_swap(c: Ctx) -> Check:
         swappiness = setup.read_sysctl("vm.swappiness", c.root)
         note = ("" if swappiness is None or swappiness >= 100 else
                 f"; vm.swappiness is {swappiness}, the measured zram setup ran with {capacity.ZRAM_SWAPPINESS} "
-                f"(sf config set performance.swappiness {capacity.ZRAM_SWAPPINESS} && sudo sf host apply)")
+                f"(sf config set performance.swappiness {capacity.ZRAM_SWAPPINESS} && sf host apply)")
         return Check("mem.swap", "Swap / zram", OK,
                      f"{swap / 1024:.1f} GB swap, {capacity.zram_size_mb(c.root) / 1024:.1f} GB of it zram" + note)
-    hint = "sf config set performance.zram.enabled true && sudo sf host apply    # compressed swap in RAM"
+    hint = "sf config set performance.zram.enabled true && sf host apply    # compressed swap in RAM"
     if not swap:
         return Check("mem.swap", "Swap / zram", WARN,
                      "no swap at all: when memory runs out the kernel kills Androids instead of slowing down", hint)
@@ -576,7 +581,7 @@ def check_secure_boot(c: Ctx) -> Check:
     return Check("boot.secureboot", "Secure Boot", OK,
                  "on: the kernel refuses unsigned modules. Only the virtual camera module (v4l2loopback) is "
                  "affected; it must be signed with an enrolled key after every kernel update",
-                 "sudo scripts/host/sign-module.sh v4l2loopback    # prints enrolment steps when no key is enrolled")
+                 f"{SIGN_MODULE}    # prints enrolment steps when no key is enrolled")
 
 
 def check_camera_module(c: Ctx) -> Check:
@@ -590,7 +595,7 @@ def check_camera_module(c: Ctx) -> Check:
                       if (c.root / f"dev/video{n}").exists())
         return Check("camera.module", title, OK,
                      f"loaded; {present} of {c.config.media.camera.slots} camera devices exist"
-                     + ("" if present or not enabled else " (run `sudo sf host apply` to create them)"))
+                     + ("" if present or not enabled else " (run `sf host apply` to create them)"))
     if not enabled:
         return Check("camera.module", title, SKIP, f"cameras are off (media.camera.enabled); module state: {st}")
     if st == "available":
@@ -600,14 +605,14 @@ def check_camera_module(c: Ctx) -> Check:
             signer = r.stdout.strip() if r and r.ok else ""
         if sb and not signer:
             return Check("camera.module", title, FAIL, "installed but unsigned, and Secure Boot is on: it will not load",
-                         "sudo scripts/host/sign-module.sh v4l2loopback\nsudo sf host apply")
+                         f"{SIGN_MODULE}\n{HOST_APPLY}")
         return Check("camera.module", title, WARN, "installed but not loaded" + (f" (signed by {signer})" if signer else ""),
-                     "sudo sf host apply")
+                     "sf host apply")
     return Check("camera.module", title, FAIL, "not installed for this kernel",
                  c.distro.install_command("build-tools", "kernel-headers")
-                 + "\nsudo native/v4l2loopback/build.sh install"
-                 + ("\nsudo scripts/host/sign-module.sh v4l2loopback    # Secure Boot is on" if sb else "")
-                 + "\nsudo sf host apply")
+                 + f"\nsudo {resource_path('native', 'v4l2loopback', 'build.sh')} install"
+                 + (f"\n{SIGN_MODULE}    # Secure Boot is on" if sb else "")
+                 + f"\n{HOST_APPLY}")
 
 
 # ============================================================ GPU
@@ -618,7 +623,8 @@ def check_gpus(c: Ctx) -> Check:
         return Check("gpu.detected", "GPUs", WARN, "no DRM render node found: Androids will draw on the CPU "
                      "(about five times the CPU of a GPU mode)",
                      "Install the GPU's kernel driver; any Intel or AMD GPU works out of the box.")
-    parts = [f"{g.node} {g.name} [{g.driver or 'no driver'}] -> {', '.join(g.usable_modes) or 'unusable: ' + g.note}"
+    parts = [f"{g.node} {g.name} [{gpu_mod.KIND_LABEL.get(g.kind, 'other')}, {g.driver or 'no driver'}] -> "
+             f"{', '.join(m for m in (g.kind, *g.usable_modes) if m) if g.usable_modes else 'unusable: ' + g.note}"
              for g in gpus]
     status = OK if any(g.usable_modes for g in gpus) else WARN
     return Check("gpu.detected", "GPUs", status, "; ".join(parts),
@@ -701,7 +707,7 @@ def check_nvidia_runtime(c: Ctx) -> Check:
     return Check("nvidia.runtime", title, WARN,
                  f"not built, NVIDIA mode is unavailable and `auto` falls back. Missing: {', '.join(st['missing'][:4])}"
                  + (" ..." if len(st["missing"]) > 4 else ""),
-                 "native/venus/build.sh all    # about 15 minutes; needs Docker and 6 GB of disk")
+                 f"{resource_path('native', 'venus', 'build.sh')} all    # about 15 minutes; needs Docker and 6 GB of disk")
 
 
 def check_nvidia_relay(c: Ctx) -> Check:
@@ -719,7 +725,7 @@ def check_nvidia_relay(c: Ctx) -> Check:
     probe = sock_root if sock_root.exists() else sock_root.parent
     if not os.access(probe, os.W_OK):
         return Check("nvidia.relay", title, WARN, f"not running, and {probe} is not writable by this user",
-                     "sudo sf host apply    # creates the socket folder; or set gpu.nvidia.socket_dir to a folder you own")
+                     "sf host apply    # creates the socket folder; or set gpu.nvidia.socket_dir to a folder you own")
     return Check("nvidia.relay", title, OK, "not running; it is started with the first NVIDIA Android")
 
 
@@ -864,21 +870,31 @@ def check_session(c: Ctx) -> Check:
     rt = c.root / runtime.lstrip("/")
     display = bool(c.env.get("WAYLAND_DISPLAY") or c.env.get("DISPLAY")) or any(rt.glob("wayland-*"))
     sound = (rt / "pulse/native").exists() or (rt / "pipewire-0").exists()
+    # The daemon normally runs as a user service, which gets its environment from the user
+    # manager rather than from this terminal: say what a service started now would have.
+    note = ""
+    if c.root == Path("/"):
+        names = service.manager_variables(c.run)
+        if names is not None:
+            known = [v for v in service.DISPLAY_VARS if v in names]
+            note = ("; a user service started now gets " + ", ".join(known) if known else
+                    "; the user manager has no display variables, so a user service started now has no display")
     if display and sound:
-        return Check("session.desktop", title, OK, "display and sound server reachable")
+        return Check("session.desktop", title, OK, "display and sound server reachable" + note)
     lacking = [n for n, ok in (("display", display), ("sound server", sound)) if not ok]
     return Check("session.desktop", title, WARN,
                  f"no {' or '.join(lacking)} for this process: native device windows / listening will not work "
-                 "(the web panel still does)",
-                 "Run the daemon inside your desktop login, or as the superfarm service of the logged-in user "
-                 "(it sets XDG_RUNTIME_DIR; see deploy/systemd/superfarm.service).")
+                 "(the web panel still does)" + note,
+                 "Run the daemon inside your desktop login (`sf serve`), or as your user service: sf service install\n"
+                 "systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY    # from a desktop "
+                 "terminal, when the session does not publish them itself; then: systemctl --user restart superfarm")
 
 
 def check_user(c: Ctx) -> Check:
     if os.geteuid() == 0:
         return Check("user.daemon", "Run as the desktop user", WARN,
                      "running as root: no display, no sound, and every file the farm writes becomes root's",
-                     "Run `sf` as your normal user; only `sudo sf host apply` needs root.")
+                     "Run `sf` as your normal user; only `sf host apply` needs root, and it asks for sudo itself.")
     return Check("user.daemon", "Run as the desktop user", OK, c.env.get("USER") or str(os.getuid()))
 
 
@@ -891,7 +907,7 @@ def check_host_setup(c: Ctx) -> Check:
         return Check("host.setup", title, OK, "module list, kernel limits and the boot service are installed")
     lacking = [n for n, ok in (("module list", conf), ("kernel limits", sysctl), ("boot service", unit)) if not ok]
     return Check("host.setup", title, WARN, f"not installed: {', '.join(lacking)}. The farm may work now and "
-                 "stop after the next reboot", "sudo sf host apply    # add --dry-run to see every command first")
+                 "stop after the next reboot", "sf host apply    # add --dry-run to see every command first")
 
 
 CHECKS: tuple[Callable[[Ctx], Check], ...] = (

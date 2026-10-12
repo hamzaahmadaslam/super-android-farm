@@ -187,7 +187,7 @@ def test_autoload_off_makes_idle_modules_a_failure(tmp_path):
 def test_autoload_off_with_everything_loaded_only_asks_to_make_it_permanent(tmp_path):
     root, paths = healthy(tmp_path, modprobe="\n")
     c = run(root, paths)["kernel.autoload"]
-    assert c.status == "ok" and "not yet made permanent" in c.detail and c.fix == "sudo sf host apply"
+    assert c.status == "ok" and "not yet made permanent" in c.detail and c.fix == "sf host apply"
 
 
 def test_module_missing_for_this_kernel_fails(tmp_path):
@@ -219,7 +219,8 @@ def test_docker_missing_gives_the_install_line_for_this_distribution(tmp_path):
     assert run(root, paths, which=lambda n: None)["docker.installed"].fix == "sudo pacman -S --needed --noconfirm docker"
 
 
-def test_docker_permission_denied_names_the_group_fix(tmp_path):
+def test_docker_permission_denied_names_the_group_fix(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor.os, "geteuid", lambda: 1000)     # the suite also runs as root in the distro containers
     root, paths = healthy(tmp_path)
     r = run(root, paths, runner=make_runner(docker_error="permission denied while trying to connect to the Docker daemon socket"))
     assert r["docker.access"].status == "fail" and r["docker.access"].fix.startswith("sudo usermod -aG docker farmer")
@@ -320,7 +321,7 @@ def test_docker_data_filesystem_is_checked_too(tmp_path):
 def test_secure_boot_states(tmp_path):
     root, paths = healthy(tmp_path / "on", secure_boot=True)
     on = run(root, paths)["boot.secureboot"]
-    assert on.status == "ok" and "refuses unsigned modules" in on.detail and "sign-module.sh" in on.fix
+    assert on.status == "ok" and "refuses unsigned modules" in on.detail and on.fix.startswith("sf host sign-module -- v4l2loopback")
     root, paths = healthy(tmp_path / "off", secure_boot=False)
     assert "off" in run(root, paths)["boot.secureboot"].detail
     root, paths = healthy(tmp_path / "bios")
@@ -332,7 +333,11 @@ def test_camera_module_states(tmp_path):
     root, paths = healthy(tmp_path / "a", secure_boot=True)
     assert run(root, paths)["camera.module"].status == "skip"                    # cameras off, module absent
     missing = run(root, paths, cam)["camera.module"]
-    assert missing.status == "fail" and "native/v4l2loopback/build.sh install" in missing.fix and "sign-module.sh" in missing.fix
+    assert missing.status == "fail" and "native/v4l2loopback/build.sh install" in missing.fix
+    # The build script is named by its real location, the CLI commands as the CLI spells them.
+    lines = missing.fix.splitlines()
+    assert lines[1].startswith("sudo /") and lines[1].endswith("/native/v4l2loopback/build.sh install")
+    assert lines[2].startswith("sf host sign-module -- v4l2loopback") and lines[3] == "sf host apply"
     assert "linux-headers-" in missing.fix
     root, paths = healthy(tmp_path / "b", secure_boot=True, on_disk=[*ALL_MODULES, "v4l2loopback"])
     unsigned = run(root, paths, cam)["camera.module"]

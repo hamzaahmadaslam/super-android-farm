@@ -33,7 +33,7 @@ from collections.abc import Callable, Iterable, Sequence
 
 from ..config import Config
 from ..core.models import check_id
-from ..paths import REPO_DIR
+from ..resources import resource_path
 from ..util.files import locked, read_json, write_json
 
 # Name the HAL shim opens inside Android. Fixed in the compiled shim (native/camera/mic_shim.c);
@@ -192,7 +192,7 @@ def prime_command(*, ffmpeg: str, fifo: Path, settings: VideoSettings, frames: i
 
 def script_path(name: str) -> Path:
     """Helper scripts ship in scripts/camera of the source tree."""
-    path = REPO_DIR / "scripts" / "camera" / name
+    path = resource_path("scripts", "camera", name)
     if not path.is_file():
         raise FileNotFoundError(
             f"{path} is missing. The camera helpers ship in the project's scripts/camera folder; "

@@ -47,6 +47,20 @@ include = ["superfarm*"]
 [tool.setuptools.package-data]
 superfarm = ["web/**/*", "data/**/*"]
 
+# Dockerfiles, unit templates, helper scripts and native sources live outside the package
+# folder; a wheel carries them as data files and superfarm.resources finds them again.
+# One line per folder (data files are not copied recursively); a unit test fails when a
+# folder under deploy/, scripts/ or native/ is missing here.
+[tool.setuptools.data-files]
+"share/superfarm-resources/deploy/docker/android" = ["deploy/docker/android/*"]
+"share/superfarm-resources/deploy/docker/net" = ["deploy/docker/net/*"]
+"share/superfarm-resources/deploy/systemd" = ["deploy/systemd/*"]
+"share/superfarm-resources/scripts/camera" = ["scripts/camera/*"]
+"share/superfarm-resources/scripts/host" = ["scripts/host/*"]
+"share/superfarm-resources/native/camera" = ["native/camera/*"]
+"share/superfarm-resources/native/v4l2loopback" = ["native/v4l2loopback/*"]
+"share/superfarm-resources/native/venus" = ["native/venus/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
 addopts = "-q"

@@ -16,6 +16,11 @@ Rules this module exists to enforce (each one was an incident on a real farm):
   * Nothing the farm did not create is ever removed: containers are checked for the farm's
     label before they are touched, and an adopted data volume is only ever detached.
 
+Two kinds of refusal can be overridden by the operator with `force=True`, and only those:
+going over the capacity estimate while performance.enforce_capacity is on (OverCapacity),
+and an operation that puts existing data at risk (NeedsForce). `force` never means
+"rebuild the containers"; that is `recreate`.
+
 The GPU, network and camera modules are imported lazily through `Backends`, so this module
 loads (and is testable) without them.
 """
@@ -42,7 +47,7 @@ from ..util.proc import CommandError
 from . import device_profile
 from .adb import Adb, AdbError
 from .docker import Docker
-from .images import ImageError, Images
+from .images import VERSION_BOUND, ImageError, Images
 from .models import DeviceIdentity, InstanceSpec, Names, Resolved, check_id, parse_selector, resolve
 from .planner import (
     LABEL_CPUSET,
@@ -120,8 +125,21 @@ class InstanceBusy(InstanceError):
     pass
 
 
-class MemoryGuardError(InstanceError):
-    pass
+class OverCapacity(InstanceError):
+    """A start was refused because performance.enforce_capacity is on and the machine is at
+    its estimated limit. `capacity` is what InstanceManager.capacity() returned, so a caller
+    can show it and offer "run anyway" (the same start with force=True)."""
+    code = "over_capacity"
+
+    def __init__(self, message: str, capacity: dict):
+        super().__init__(message)
+        self.capacity = capacity
+
+
+class NeedsForce(InstanceError):
+    """Refused because it puts an Android's data at risk; repeating it with force=True is
+    the operator's explicit "I know"."""
+    code = "needs_force"
 
 
 class StartError(InstanceError):
@@ -195,28 +213,39 @@ def _net_function(name: str) -> Callable:
 
 
 def _gpu_choose(r: Resolved, config: Config, paths: Paths, *, counts: dict[str, int] | None = None):
+    # For an NVIDIA choice this also starts the relay when it is not running (and leaves a
+    # running one alone), and its run_args already carry the socket and runtime mounts.
     from ..host import gpu
     return gpu.choose(r, config, paths, counts=counts)
 
 
-def _ensure_relay(config: Config, paths: Paths, node: str) -> str:
-    from ..host import venus
-    return str(venus.ensure_relay(config, paths, node))
+_GPU_LIST_TTL = 60.0
+_gpu_list: tuple[float, list] | None = None
+_gpu_list_lock = threading.Lock()
 
 
-def _gateway_ensure(docker: Docker, config: Config, paths: Paths, name: str) -> dict:
-    from ..net import gateway
-    return gateway.ensure(docker, config, paths, name)
+def _capacity_estimate(config: Config, running: int) -> dict:
+    """host.capacity.estimate for this machine. The card list is kept for a minute: reading
+    it runs lspci and nvidia-smi, and a bulk start asks once per Android."""
+    global _gpu_list
+    from ..host import capacity, gpu
+    with _gpu_list_lock:
+        if _gpu_list is None or time.monotonic() - _gpu_list[0] > _GPU_LIST_TTL:
+            _gpu_list = (time.monotonic(), gpu.nvidia_vram(gpu.detect_gpus()))
+        gpus = _gpu_list[1]
+    return capacity.estimate(config, gpus, running=running)
 
 
 @dataclass
 class Backends:
     """Everything the manager needs from outside this module. Each entry defaults to the
-    real implementation, looked up on first use; tests replace entries with fakes."""
+    real implementation, looked up on first use; tests replace entries with fakes.
+
+    The network module's sidecar_run_args() builds the sidecar image when it is missing and
+    brings a shared gateway (and the farm's uplink network) up by itself, so there is no
+    separate entry for either."""
     gpu_choose: Callable[..., Any] = _gpu_choose
-    ensure_relay: Callable[[Config, Paths, str], str] = _ensure_relay
-    gateway_ensure: Callable[..., Any] = _gateway_ensure
-    net_ensure_image: Callable[..., Any] = field(default=lambda docker: _net_function("ensure_image")(docker))
+    capacity_estimate: Callable[[Config, int], dict] = _capacity_estimate
     sidecar_run_args: Callable[..., list[str]] = field(
         default=lambda r, config, paths, store, docker: _net_function("sidecar_run_args")(r, config, paths, store, docker))
     net_wait_ready: Callable[..., dict] = field(
@@ -230,25 +259,37 @@ class Backends:
 
 # ============================================================================= guards
 
-class _MemoryGuard:
+class _Booting:
+    """Androids that are being started right now and the memory each is expected to take.
+
+    Several starts running side by side would otherwise all read the same "available"
+    memory and the same count of running Androids, and each conclude there is room."""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._reserved: dict[int, int] = {}
 
-    def reserve(self, instance_id: int, need_mb: int, guard_mb: int, available_mb: int) -> None:
+    def reserve(self, instance_id: int, need_mb: int) -> tuple[set[int], int]:
+        """Register a start. Returns the *other* Androids that are booting and the memory
+        (MB) already promised to them."""
         with self._lock:
-            pending = sum(v for k, v in self._reserved.items() if k != instance_id)
-            if guard_mb > 0 and available_mb >= 0 and available_mb - pending < guard_mb:
-                booting = f" ({pending} MB of it is already promised to Androids that are booting)" if pending else ""
-                raise MemoryGuardError(
-                    f"not starting Android {instance_id}: {available_mb} MB of RAM is available{booting} and the farm "
-                    f"keeps {guard_mb} MB free (performance.memory_guard_mb). Stop some Androids, enable zram "
-                    f"(performance.zram.enabled + host setup), or lower the guard")
+            others = {k: v for k, v in self._reserved.items() if k != instance_id}
             self._reserved[instance_id] = need_mb
+            return set(others), sum(others.values())
 
     def release(self, instance_id: int) -> None:
         with self._lock:
             self._reserved.pop(instance_id, None)
+
+
+def version_order(new: str, old: str) -> int | None:
+    """-1 when `new` is an older Android release than `old`, 1 when newer, 0 when the same,
+    None when it cannot be told (a custom version name)."""
+    a, b = re.match(r"\d+", str(new)), re.match(r"\d+", str(old))
+    if not a or not b:
+        return 0 if str(new) == str(old) else None
+    x, y = int(a.group()), int(b.group())
+    return (x > y) - (x < y)
 
 
 def _step(task: Task | None, message: str) -> None:
@@ -276,7 +317,9 @@ class InstanceManager:
         self._guard = threading.Lock()
         self._activity: dict[int, str] = {}
         self._booted: set[int] = set()
-        self._memory = _MemoryGuard()
+        self._booting = _Booting()
+        from .backup import Backups          # backup.py imports this module
+        self.backups = Backups(self)
 
     def reload_config(self, config: Config) -> None:
         """Swap in a new config. Running Androids are untouched; changes reach an Android at
@@ -405,6 +448,64 @@ class InstanceManager:
                 out.add(int(c["labels"][LABEL_INSTANCE]))
         return out
 
+    # ----------------------------------------------------------------- capacity
+    def capacity(self) -> dict:
+        """How full this machine is. Advisory: by default the farm only warns.
+
+            estimate             host.capacity.estimate (max by RAM / CPU / VRAM, which one binds)
+            running              Androids running now
+            headroom             how many more fit before the estimate is reached (never negative)
+            over                 True when starting one more now would go past the estimate or
+                                 leave less than performance.memory_guard_mb of RAM available
+            reasons              why `over` is True, in words
+            memory_available_mb  MemAvailable right now (-1 when it cannot be read)
+            enforced             performance.enforce_capacity: is a start over capacity refused?
+            advice               what would raise the limit, most effective first
+        """
+        return self._capacity(len(self._running_ids()))
+
+    def _capacity(self, running: int, *, promised_mb: int = 0) -> dict:
+        perf = self.config.performance
+        try:
+            estimate = dict(self.backends.capacity_estimate(self.config, running) or {})
+        except Exception as e:  # noqa: BLE001 - advisory figure: a broken probe must not stop a start
+            log.warning("capacity estimate failed: %s", e)
+            estimate = {"error": f"{type(e).__name__}: {e}"[:300]}
+        limit = estimate.get("max_instances")
+        available = self.backends.mem_available_mb()
+        reasons: list[str] = []
+        if isinstance(limit, int) and running >= limit:
+            reasons.append(f"{running} Android(s) are running and this machine is estimated to hold about {limit} "
+                           f"(limited by {estimate.get('binding') or 'its resources'})")
+        if perf.memory_guard_mb > 0 and available >= 0 and available - promised_mb < perf.memory_guard_mb:
+            booting = f", {promised_mb} MB of it promised to Androids that are booting" if promised_mb else ""
+            reasons.append(f"{available} MB of RAM is available{booting}; below performance.memory_guard_mb "
+                           f"({perf.memory_guard_mb} MB)")
+        return {"estimate": estimate, "running": running,
+                "headroom": max(0, limit - running) if isinstance(limit, int) else 0,
+                "over": bool(reasons), "reasons": reasons, "memory_available_mb": available,
+                "enforced": perf.enforce_capacity, "advice": list(estimate.get("advice") or [])}
+
+    def _check_capacity(self, id: int, need_mb: int, force: bool) -> list[str]:
+        """Called before a stopped Android is started. Returns warnings; raises OverCapacity
+        only when the operator asked for the estimate to be enforced and did not force."""
+        booting, promised = self._booting.reserve(id, need_mb)
+        try:
+            capacity = self._capacity(len((self._running_ids() | booting) - {id}), promised_mb=promised)
+        except BaseException:
+            self._booting.release(id)
+            raise
+        if not capacity["over"]:
+            return []
+        why = "; ".join(capacity["reasons"])
+        if capacity["enforced"] and not force:
+            self._booting.release(id)
+            raise OverCapacity(
+                f"not starting Android {id}: over capacity ({why}). Stop some Androids, or start it anyway with "
+                "force (`sf start --force`); set performance.enforce_capacity to false to only be warned", capacity)
+        return [f"over capacity: {why}. Started anyway "
+                + ("because the start was forced" if capacity["enforced"] else "(performance.enforce_capacity is off)")]
+
     # ------------------------------------------------------------- create / edit
     def create(self, *, count: int = 1, name: str = "", template: dict | None = None) -> list[InstanceSpec]:
         """Add `count` Androids. Nothing is started and no container is made yet.
@@ -476,8 +577,20 @@ class InstanceManager:
         if not self.docker.volume_exists(volume):
             raise ValueError(f"Docker volume {volume} does not exist; `docker volume ls` shows the ones that do")
 
-    def update(self, id: int, patch: dict) -> InstanceSpec:
-        """Change saved settings of one Android. Validated now, applied at its next (re)start."""
+    def _has_data(self, spec: InstanceSpec) -> bool:
+        if self.store.state_get(spec.id, "data_android_version"):
+            return True
+        try:
+            return self.docker.volume_exists(self.volume_of(spec))
+        except (CommandError, InstanceError):
+            return False        # Docker down: what the farm recorded above is all there is to go on
+
+    def update(self, id: int, patch: dict, *, force: bool = False) -> InstanceSpec:
+        """Change saved settings of one Android. Validated now, applied at its next (re)start.
+
+        Changing the Android version of an instance that already has data is refused unless
+        `force`: an Android cannot boot /data written by a newer release, and an upgrade
+        rewrites /data in a way the older release cannot read again."""
         spec = self._spec(id)
         if not isinstance(patch, dict):
             raise ValueError("patch must be a mapping of fields to new values")
@@ -495,7 +608,15 @@ class InstanceManager:
         if new.data_volume and new.data_volume != spec.data_volume:
             self._check_adoptable(new.data_volume, spec.id)
         device_profile.validate_identity(new.device)
-        self._resolve(new)
+        wanted = self._resolve(new).android_version
+        current = spec.android_version or self.config.android.default_version
+        if wanted != current and not force and self._has_data(spec):
+            written = self.store.state_get(spec.id, "data_android_version") or current
+            raise NeedsForce(
+                f"Android {spec.id} already has data, written by Android {written}; its version is not changed to "
+                f"{wanted}. An Android cannot boot data written by a newer release, and an upgrade cannot be undone. "
+                f"To go ahead anyway repeat the change with force (a backup is taken before the first start on the "
+                f"new version when backup.auto_before_risky is on), or create a new Android with version {wanted}")
         with self.locked(spec.id, "updating"):
             self.store.save(new)
         return new
@@ -537,8 +658,14 @@ class InstanceManager:
         self.store.delete(id)
 
     # ------------------------------------------------------------------- delete
-    def delete(self, id: int, *, keep_data: bool = False, remove_adopted: bool = False) -> None:
+    def delete(self, id: int, *, keep_data: bool = False, remove_adopted: bool = False, force: bool = False) -> dict:
         """Remove an Android: its containers, its settings and, unless `keep_data`, its data.
+
+        Returns {"id", "data": removed | kept | none, "volume", "backup", "warnings"}.
+
+        With backup.auto_before_risky (the default) the data is backed up before it is
+        removed, and `backup` is where. If that backup cannot be made the Android is left
+        as it was, only stopped, and NeedsForce is raised; `force=True` deletes regardless.
 
         A volume the farm did not create (adopted through data_volume, or simply not carrying
         the farm's label) is never deleted here; the Android is only detached from it.
@@ -546,24 +673,37 @@ class InstanceManager:
         spec = self._spec(id)
         names = self.names(spec.id)
         with self.locked(spec.id, "deleting"):
-            self._remove_containers(names)
             volume = self.volume_of(spec)
             adopted = bool(spec.data_volume)
+            out: dict[str, Any] = {"id": spec.id, "data": "kept", "volume": volume, "backup": "", "warnings": []}
+            remove = False
             if keep_data:
                 log.info("Android %s deleted, data volume %s kept", spec.id, volume)
             elif not self.docker.volume_exists(volume):
-                pass
+                out["data"] = "none"
             elif adopted and not remove_adopted:
-                log.warning("Android %s deleted; adopted volume %s was not created by this farm and is left in place",
-                            spec.id, volume)
+                out["warnings"].append(f"adopted volume {volume} was not created by this farm and is left in place")
             elif not adopted and not self._volume_is_ours(volume, spec.id):
-                log.warning("Android %s deleted; volume %s does not carry this farm's label and is left in place",
-                            spec.id, volume)
-            elif not self.docker.volume_rm(volume):
-                raise InstanceError(f"volume {volume} could not be removed (is another container using it?); "
-                                    f"Android {spec.id} was not deleted. Check `docker ps -a --filter volume={volume}`")
+                out["warnings"].append(f"volume {volume} does not carry this farm's label and is left in place")
+            else:
+                remove = True
+            if remove:
+                # Stopped, not yet removed: if the backup fails, nothing has been lost.
+                self._stop(spec.id)
+                out["backup"], note = self.backups.safety(spec, "before-delete", force=force)
+                if note:
+                    out["warnings"].append(note)
+            self._remove_containers(names)
+            if remove:
+                if not self.docker.volume_rm(volume):
+                    raise InstanceError(f"volume {volume} could not be removed (is another container using it?); "
+                                        f"Android {spec.id} was not deleted. Check `docker ps -a --filter volume={volume}`")
+                out["data"] = "removed"
+            for w in out["warnings"]:
+                log.warning("Android %s deleted; %s", spec.id, w)
             self._booted.discard(spec.id)
             self.store.delete(spec.id)
+        return out
 
     def _volume_is_ours(self, volume: str, id: int) -> bool:
         r = self.docker.run(["volume", "inspect", "--format",
@@ -590,27 +730,34 @@ class InstanceManager:
             pass
 
     # --------------------------------------------------------------- start/stop
-    def start(self, id: int, task: Task | None = None) -> dict:
+    def start(self, id: int, task: Task | None = None, *, force: bool = False) -> dict:
+        """Bring an Android up and wait until it has booted.
+
+        `force` is the operator's "do it anyway" for the two refusals a start can make:
+        over capacity while performance.enforce_capacity is on (OverCapacity), and booting
+        data written by a newer Android version (NeedsForce). It does not rebuild
+        containers; that is recreate()."""
         spec = self._spec(id)
         with self.locked(spec.id, "starting"):
-            return self._start(spec.id, task, force=False)
+            return self._start(spec.id, task, recreate=False, force=force)
 
     def stop(self, id: int) -> None:
         spec = self._spec(id)
         with self.locked(spec.id, "stopping"):
             self._stop(spec.id)
 
-    def restart(self, id: int, task: Task | None = None) -> dict:
+    def restart(self, id: int, task: Task | None = None, *, force: bool = False) -> dict:
         spec = self._spec(id)
         with self.locked(spec.id, "restarting"):
+            was_running = self._ours(self.names(spec.id).android) and self.docker.running(self.names(spec.id).android)
             self._stop(spec.id)
-            return self._start(spec.id, task, force=False)
+            return self._start(spec.id, task, recreate=False, force=force, replacing=was_running)
 
-    def recreate(self, id: int, task: Task | None = None) -> dict:
+    def recreate(self, id: int, task: Task | None = None, *, force: bool = False) -> dict:
         """Rebuild both containers even if the plan is unchanged. /data is kept."""
         spec = self._spec(id)
         with self.locked(spec.id, "recreating"):
-            return self._start(spec.id, task, force=True)
+            return self._start(spec.id, task, recreate=True, force=force)
 
     def _stop(self, id: int) -> None:
         names = self.names(id)
@@ -624,9 +771,13 @@ class InstanceManager:
         self._booted.discard(id)
         self._adb_disconnect(id)
 
-    def _start(self, id: int, task: Task | None, *, force: bool) -> dict:
+    def _start(self, id: int, task: Task | None, *, recreate: bool, force: bool = False, replacing: bool = False) -> dict:
+        """`recreate` rebuilds the containers even when their plan is unchanged; `force`
+        overrides the capacity and data-version refusals. The two are unrelated.
+        `replacing` says this Android was running a moment ago (a restart, a backup that
+        stopped it): bringing it back adds nothing to the machine, so capacity is not asked."""
         try:
-            result = self._start_inner(self.store.get(id), task, force)
+            result = self._start_inner(self.store.get(id), task, recreate=recreate, force=force, replacing=replacing)
         except Cancelled:
             raise
         except Exception as e:
@@ -634,9 +785,11 @@ class InstanceManager:
             self.store.state_set(id, "last_error", f"{type(e).__name__}: {e}"[:500])
             raise
         self.store.state_set(id, "last_error", None)
+        self.store.state_set(id, "warnings", [w[:400] for w in result["warnings"]] or None)
         return result
 
-    def _start_inner(self, spec: InstanceSpec, task: Task | None, force: bool) -> dict:
+    def _start_inner(self, spec: InstanceSpec, task: Task | None, *, recreate: bool, force: bool,
+                     replacing: bool = False) -> dict:
         id, began = spec.id, time.monotonic()
         r = self._resolve(spec)
         names = r.names
@@ -644,7 +797,7 @@ class InstanceManager:
         net_exists = self._ours(names.net)
         warnings: list[str] = []
 
-        if not force and android_running and net_exists and self.docker.running(names.net):
+        if not recreate and android_running and net_exists and self.docker.running(names.net):
             # Already up: a start never rebuilds a running Android behind the operator's back,
             # even if settings changed since it was created. `restart` applies those.
             _step(task, f"Android {id}: already running")
@@ -653,42 +806,36 @@ class InstanceManager:
             warnings += self._post_boot(spec, r, adb)
             return {"id": id, "state": "booted", "recreated": False, "already_running": True,
                     "gpu": self.docker.label(names.android, LABEL_GPU), "gpu_node": self.docker.label(names.android, LABEL_GPU_NODE),
-                    "serial": adb.serial, "boot_seconds": round(time.monotonic() - began, 1), "warnings": warnings}
+                    "serial": adb.serial, "boot_seconds": round(time.monotonic() - began, 1), "warnings": warnings,
+                    "backup": ""}
 
         reserved = False
-        if not android_running:
-            _step(task, f"Android {id}: checking memory")
-            self._memory.reserve(id, min(r.memory_mb, ANDROID_FOOTPRINT_MB),
-                                 self.config.performance.memory_guard_mb, self.backends.mem_available_mb())
+        if not android_running and not replacing:
+            _step(task, f"Android {id}: checking capacity")
+            warnings += self._check_capacity(id, min(r.memory_mb, ANDROID_FOOTPRINT_MB), force)
             reserved = True
         try:
+            safety_backup, notes = self._check_data_version(spec, r, force, task)
+            warnings += notes
             _step(task, f"Android {id}: preparing images")
             try:
                 image = (self.images.ensure_ref(spec.image, task=task) if spec.image
                          else self.images.ensure(r.android_version, task=task))
             except ImageError as e:
                 raise StartError(f"Android {id}: {e}") from None
-            self.backends.net_ensure_image(self.docker)
 
             containers = self._farm_containers()
             r = r.model_copy(update={"image": image, "cpuset": self._choose_cpuset(spec, r, containers)})
-            gpu = self.backends.gpu_choose(r, self.config, self.paths, counts=_gpu_counts(containers, id))
-            gpu_args = list(gpu.run_args)
-            if gpu.mode == "nvidia":
-                # The relay must be serving before Android's graphics come up, and a relay
-                # that is already running is left alone (restarting it would blank every
-                # Android on that card).
-                socket_dir = self.backends.ensure_relay(self.config, self.paths, gpu.node)
-                if socket_dir and not any(str(a).endswith(":/venus") or ":/venus:" in str(a) for a in gpu_args):
-                    gpu_args += ["-v", f"{socket_dir}:/venus"]
-            gpu = _Gpu(mode=gpu.mode, node=gpu.node, run_args=gpu_args, boot_args=list(gpu.boot_args))
-            if r.net_mode == "gateway":
-                self.backends.gateway_ensure(self.docker, self.config, self.paths, r.gateway)
-            net_args = [str(a) for a in self.backends.sidecar_run_args(r, self.config, self.paths, self.store, self.docker)]
+            gpu, notes = self._choose_gpu(r, _gpu_counts(containers, id))
+            warnings += notes
+            try:
+                net_args = [str(a) for a in self.backends.sidecar_run_args(r, self.config, self.paths, self.store, self.docker)]
+            except (ValueError, RuntimeError) as e:
+                raise StartError(f"Android {id}: network ({r.net_mode}): {e}") from None
             extra = self._extra_run_args(r)
             digest = plan_hash(r, gpu, net_args, extra_run_args=extra, image_id=self.docker.image_id(image))
 
-            same = (not force and net_exists
+            same = (not recreate and net_exists
                     and self.docker.label(names.android, LABEL_PLAN) == digest
                     and self.docker.label(names.net, LABEL_PLAN) == digest)
             fresh_volume = self._ensure_volume(spec, r)
@@ -710,22 +857,88 @@ class InstanceManager:
                 self._wait_net(r)
                 _step(task, f"Android {id}: starting Android ({gpu.mode})")
                 self.docker.create_and_start(plan_android(r, gpu=gpu, extra_run_args=extra, plan_hash=digest))
-            self.store.state_set(id, "gpu", {"mode": gpu.mode, "node": gpu.node})
+            # kind and label are the host module's words for the panel ("igpu", "Intel UHD ... (integrated, Mesa)").
+            self.store.state_set(id, "gpu", {"mode": gpu.mode, "node": gpu.node, "kind": str(getattr(gpu, "kind", "")),
+                                             "label": str(getattr(gpu, "label", ""))})
             _step(task, f"Android {id}: waiting for boot")
             adb = self._wait_boot(r, task)
         finally:
             if reserved:
-                self._memory.release(id)
+                self._booting.release(id)
 
         self._booted.add(id)
         boot_seconds = round(time.monotonic() - began, 1)
+        if self.store.state_get(id, "data_android_version") != r.android_version:
+            # The release that last booted this /data: what a later version change is judged against.
+            self.store.state_set(id, "data_android_version", r.android_version)
         _step(task, f"Android {id}: applying settings")
         warnings += self._post_boot(spec, r, adb)
         self.store.state_set(id, "last_start", time.time())
         for w in warnings:
             log.warning("Android %s: %s", id, w)
         return {"id": id, "state": "booted", "recreated": not same, "already_running": False, "gpu": gpu.mode,
-                "gpu_node": gpu.node, "serial": adb.serial, "boot_seconds": boot_seconds, "warnings": warnings}
+                "gpu_node": gpu.node, "gpu_label": str(getattr(gpu, "label", "")),
+                "gpu_reason": str(getattr(gpu, "reason", "")), "serial": adb.serial,
+                "boot_seconds": boot_seconds, "warnings": warnings, "backup": safety_backup}
+
+    def _check_data_version(self, spec: InstanceSpec, r: Resolved, force: bool, task: Task | None) -> tuple[str, list[str]]:
+        """Compare the Android version about to boot with the one that last booted this /data.
+
+        Newer than the data: goes ahead with a warning (Android migrates /data forward, and
+        there is no way back). Older than the data: refused unless forced, because that
+        Android cannot read it. Either way the data is backed up first when
+        backup.auto_before_risky is on. Returns (backup path or "", warnings)."""
+        written = str(self.store.state_get(spec.id, "data_android_version") or "")
+        if not written or written == r.android_version or not self.docker.volume_exists(self.volume_of(spec)):
+            return "", []
+        order = version_order(r.android_version, written)
+        if order == -1 and not force:
+            raise NeedsForce(
+                f"Android {spec.id}: its data was written by Android {written} and it is now set to Android "
+                f"{r.android_version}. An older Android cannot read data from a newer one and usually does not "
+                f"boot with it. Set the version back to {written}, restore a backup made on Android "
+                f"{r.android_version}, or start with force to try anyway")
+        if order == 1:
+            notes = [f"data was written by Android {written} and now boots on Android {r.android_version}: "
+                     "Android upgrades it in place and it cannot go back to the older version"]
+        elif order == -1:
+            notes = [f"forced: booting data written by Android {written} on the older Android {r.android_version}"]
+        else:
+            notes = [f"data was last booted with Android image version {written!r}, now {r.android_version!r}"]
+        if order == 0 or not self.config.backup.auto_before_risky:
+            return "", notes            # the same release under another name is not a version change
+        _step(task, f"Android {spec.id}: backing up before the version change")
+        self._stop(spec.id)                    # a recreate can arrive here with the Android still up
+        backup, note = self.backups.safety(spec, "before-version-change", force=force, task=task)
+        return backup, notes + ([note] if note else [])
+
+    def _choose_gpu(self, r: Resolved, counts: dict[str, int]) -> tuple[Any, list[str]]:
+        """Ask the host module how this Android draws. The NVIDIA runtime exists for one
+        Android version only: on any other, an explicit request is refused with the reason
+        and an automatic pick falls back to the next best mode, instead of an Android that
+        dies at boot."""
+        def choose(resolved: Resolved):
+            try:
+                return self.backends.gpu_choose(resolved, self.config, self.paths, counts=counts)
+            except ValueError as e:
+                raise StartError(f"Android {r.id}: {e}") from None
+
+        gpu = choose(r)
+        blocked = self.images.feature(r.android_version, "nvidia")["unsupported"] if gpu.mode == "nvidia" else ""
+        if not blocked:
+            return gpu, []
+        if r.gpu_mode == "nvidia":
+            raise StartError(f"Android {r.id}: gpu mode 'nvidia' is {blocked}. Use Android "
+                             f"{'/'.join(VERSION_BOUND['nvidia'])} for this instance, or another gpu_mode")
+        for fallback in ("igpu", "software"):
+            try:
+                gpu = self.backends.gpu_choose(r.model_copy(update={"gpu_mode": fallback, "gpu_node": ""}),
+                                               self.config, self.paths, counts=counts)
+            except ValueError:
+                continue
+            if gpu.mode != "nvidia":
+                return gpu, [f"NVIDIA rendering is {blocked}; using {gpu.mode} instead"]
+        raise StartError(f"Android {r.id}: NVIDIA rendering is {blocked} and no other mode is available")
 
     def _extra_run_args(self, r: Resolved) -> list[str]:
         out: list[str] = []
@@ -1021,6 +1234,9 @@ class InstanceManager:
             "data_volume": spec.data_volume or names.volume, "adopted": bool(spec.data_volume),
             "autostart": spec.autostart, "device_profile": spec.device.profile,
             "uptime": None, "last_error": last_error, "last_start": state.get("last_start"),
+            # From the last start: over capacity, a version change, a setting that did not apply.
+            "warnings": [str(w) for w in state.get("warnings") or []],
+            "data_android_version": str(state.get("data_android_version") or ""),
         }
         labels = android["labels"] if android else {}
         used = state.get("gpu") or {}
@@ -1036,7 +1252,8 @@ class InstanceManager:
         out.update({"android_version": r.android_version, "image": r.image,
                     "screen": {"width": r.width, "height": r.height, "dpi": r.dpi, "fps": r.fps}})
         out["gpu"] = {"requested": r.gpu_mode, "mode": labels.get(LABEL_GPU) or used.get("mode", ""),
-                      "node": labels.get(LABEL_GPU_NODE) or used.get("node", "")}
+                      "node": labels.get(LABEL_GPU_NODE) or used.get("node", ""),
+                      "kind": used.get("kind", ""), "label": used.get("label", "")}
         out["net"] = {"mode": r.net_mode, "profile": r.vpn_profile or state.get("vpn_profile") or "",
                       "gateway": r.gateway, "proxy": r.proxy, "killswitch": r.killswitch}
         return out
@@ -1051,25 +1268,27 @@ class InstanceManager:
         return max(0.0, round(time.time() - started.timestamp(), 1))
 
     # --------------------------------------------------------------------- bulk
-    def bulk(self, action: str, selector: str) -> Task:
+    def bulk(self, action: str, selector: str, *, force: bool = False) -> Task:
         """start | stop | restart | recreate | delete for every Android a selector names.
-        Each Android is its own result; one that fails (or is refused by the memory guard)
-        never stops the others."""
+        Each Android is its own result; one that fails (or is refused: over capacity, data
+        at risk) never stops the others. `force` is passed to every one of them."""
         actions: dict[str, Callable[[int, Task], str | None]] = {
-            "start": lambda i, t: _describe(self.start(i, t)),
-            "restart": lambda i, t: _describe(self.restart(i, t)),
-            "recreate": lambda i, t: _describe(self.recreate(i, t)),
+            "start": lambda i, t: _describe(self.start(i, t, force=force)),
+            "restart": lambda i, t: _describe(self.restart(i, t, force=force)),
+            "recreate": lambda i, t: _describe(self.recreate(i, t, force=force)),
             "stop": lambda i, t: self.stop(i),
-            "delete": lambda i, t: self.delete(i),
+            "delete": lambda i, t: _describe_delete(self.delete(i, force=force)),
         }
         if action not in actions:
             raise ValueError(f"unknown action {action!r}; use one of: {', '.join(actions)}")
         ids = self.select(selector)
         perf = self.config.performance
         boots = action in ("start", "restart", "recreate")
-        # Booting is the heaviest moment in an Android's life; the other actions are cheap.
+        # Booting is the heaviest moment in an Android's life; the other actions are cheap,
+        # except a delete that first copies each Android's data to a safety backup.
+        copies = action == "delete" and self.config.backup.auto_before_risky
         return run_on_instances(self.tasks, f"instance.{action}", f"{action} {len(ids)} Android(s)", ids,
-                                actions[action], concurrency=perf.start_concurrency if boots else 8,
+                                actions[action], concurrency=perf.start_concurrency if boots else 2 if copies else 8,
                                 stagger=perf.start_stagger_seconds if boots else 0.0)
 
     def autostart(self) -> Task | None:
@@ -1080,14 +1299,6 @@ class InstanceManager:
         if not ids:
             return None
         return self.bulk("start", ",".join(str(i) for i in sorted(ids)))
-
-
-@dataclass
-class _Gpu:
-    mode: str
-    node: str
-    run_args: list[str]
-    boot_args: list[str]
 
 
 def _gpu_counts(containers: list[dict], skip_id: int) -> dict[str, int]:
@@ -1106,6 +1317,15 @@ def _describe(result: dict) -> str:
     text = f"booted in {result['boot_seconds']} s ({result['gpu']})"
     if result.get("warnings"):
         text += f"; {len(result['warnings'])} warning(s): {result['warnings'][0]}"
+    return text
+
+
+def _describe_delete(result: dict) -> str:
+    text = {"removed": "deleted with its data", "kept": "deleted, data kept", "none": "deleted"}[result["data"]]
+    if result.get("backup"):
+        text += f"; backup: {result['backup']}"
+    if result.get("warnings"):
+        text += f"; {result['warnings'][0]}"
     return text
 
 

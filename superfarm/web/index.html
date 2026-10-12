@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Super Farm</title>
+<link rel="icon" href="img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/layout.css">
+<link rel="stylesheet" href="css/components.css">
+<script type="module" src="js/main.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<div id="login" class="login" hidden>
+  <form id="login-form" class="login-card" autocomplete="off">
+    <img src="img/logo.svg" alt="" width="40" height="40">
+    <h1 id="login-title">Super Farm</h1>
+    <p class="muted">Sign in with the API token of this farm. Run <code class="nowrap">sf token</code> on the machine that hosts it to see the token.</p>
+    <label for="login-token">API token</label>
+    <input id="login-token" name="token" type="password" required autocomplete="off" spellcheck="false" aria-describedby="login-error">
+    <p id="login-error" class="form-error" role="alert"></p>
+    <button type="submit" class="btn primary">Sign in</button>
+  </form>
+</div>
+
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <button type="button" id="nav-toggle" class="btn ghost nav-toggle" aria-controls="nav" aria-expanded="false">Menu</button>
+    <a class="brand" href="#/dashboard"><img src="img/logo.svg" alt="" width="22" height="22"><span id="farm-name">Super Farm</span></a>
+    <a id="capacity-pill" class="pill" href="#/system" hidden></a>
+    <span class="spacer"></span>
+    <button type="button" id="tasks-button" class="btn ghost" aria-controls="tasks-drawer" aria-expanded="false">Tasks <span id="tasks-count" class="badge" hidden></span></button>
+    <button type="button" id="theme-toggle" class="btn ghost">Theme: auto</button>
+    <button type="button" id="logout" class="btn ghost">Sign out</button>
+  </header>
+  <nav id="nav" class="nav" aria-label="Sections">
+    <a href="#/dashboard">Dashboard</a>
+    <a href="#/androids">Androids</a>
+    <a href="#/control">Control</a>
+    <a href="#/apps">Apps</a>
+    <a href="#/network">Network</a>
+    <a href="#/automation">Automation</a>
+    <a href="#/media">Media</a>
+    <a href="#/backups">Backups</a>
+    <a href="#/system">System</a>
+    <a href="#/settings">Settings</a>
+  </nav>
+  <main id="main" class="main" tabindex="-1"></main>
+  <aside id="tasks-drawer" class="drawer" aria-label="Tasks" hidden></aside>
+</div>
+
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+<noscript><p class="noscript">The Super Farm panel needs JavaScript. Everything it does is also available from the <code>sf</code> command.</p></noscript>
+</body>
+</html>

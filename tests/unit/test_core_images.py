@@ -178,3 +178,82 @@ def test_helper_build_failure_says_how_to_fix_it(env):
     docker.build_fails = True
     with pytest.raises(ImageError, match="needs the internet once"):
         images.helper(gnu_tar=True)
+
+
+# ------------------------------------------------------------- version-bound features
+
+def versions(tmp_path, **config):
+    docker = FakeDocker()
+    images = {v: {"base": f"example/android:{v}"} for v in ("12", "13", "14")}
+    cfg = Config.model_validate({"android": {"images": images}, **config})
+    paths = Paths(tmp_path / "home").ensure()
+    return Images(docker, cfg, paths), paths
+
+
+def make_camera_overlay(folder):
+    from superfarm.media.camera import OVERLAY_REQUIRED
+    for rel in OVERLAY_REQUIRED:
+        (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+        (folder / rel).write_text("x")
+
+
+def make_nvidia_runtime(paths):
+    from superfarm.host import venus
+    for name in venus.RUNTIME_FILES:
+        (paths.overlays / "venus" / name).parent.mkdir(parents=True, exist_ok=True)
+        (paths.overlays / "venus" / name).write_text("x")
+    relay = paths.overlays / "venus-relay"
+    for rel in (venus.RELAY_BINARY, venus.RELAY_HELPER, f"lib/{venus.RELAY_LIBRARY}"):
+        (relay / rel).parent.mkdir(parents=True, exist_ok=True)
+        (relay / rel).write_text("x")
+        os.chmod(relay / rel, 0o755)
+
+
+def test_status_says_which_features_work_on_which_version(tmp_path):
+    images, paths = versions(tmp_path)
+    rows = {r["version"]: r for r in images.status()}
+    assert list(rows) == ["12", "13", "14"]
+    for version in ("12", "14"):
+        for name, words in (("camera", "the virtual camera and microphone"), ("nvidia", "NVIDIA rendering")):
+            feature = rows[version]["features"][name]
+            assert feature["supported"] is False and feature["available"] is False
+            assert feature["reason"] == feature["unsupported"] == (
+                f"not available on Android {version}: {words} is built for Android 13 only")
+        assert rows[version]["overlays_available"] == {"camera_hal": False, "nvidia_runtime": False}
+    # Android 13: supported, but nothing is built on this (empty) farm home yet
+    camera, nvidia = rows["13"]["features"]["camera"], rows["13"]["features"]["nvidia"]
+    assert camera["supported"] and not camera["available"] and camera["unsupported"] == ""
+    assert "not built yet" in camera["reason"] and "native/camera/extract_hal.sh" in camera["reason"]
+    assert str(paths.overlays / "camera" / "13") in camera["reason"]
+    assert nvidia["supported"] and not nvidia["available"] and "native/venus/build.sh" in nvidia["reason"]
+    assert rows["13"]["overlays_available"] == {"camera_hal": False, "nvidia_runtime": False}
+
+
+def test_features_become_available_when_their_files_exist(tmp_path):
+    images, paths = versions(tmp_path)
+    make_camera_overlay(paths.overlays / "camera" / "13")
+    make_camera_overlay(paths.overlays / "camera" / "12")          # files for 12 do not make 12 supported
+    make_nvidia_runtime(paths)
+    rows = {r["version"]: r for r in images.status()}
+    assert rows["13"]["overlays_available"] == {"camera_hal": True, "nvidia_runtime": True}
+    assert rows["13"]["features"]["camera"] == {"supported": True, "available": True, "unsupported": "", "reason": ""}
+    assert rows["13"]["features"]["nvidia"]["available"] is True
+    assert rows["12"]["overlays_available"] == {"camera_hal": False, "nvidia_runtime": False}
+    assert images.feature("13.0", "nvidia")["available"]
+    custom = images.feature("13-custom", "camera")            # supported, but it has its own overlay folder
+    assert custom["supported"] and not custom["available"] and "camera/13-custom" in custom["reason"]
+    assert not images.feature("custom", "nvidia")["supported"]
+
+
+def test_a_configured_camera_overlay_folder_is_the_one_checked(tmp_path):
+    elsewhere = tmp_path / "hal"
+    make_camera_overlay(elsewhere)
+    images, _ = versions(tmp_path, media={"camera": {"hal_overlay": str(elsewhere)}})
+    assert images.feature("13", "camera")["available"] is True
+
+
+def test_a_neighbour_module_that_fails_does_not_break_status(tmp_path, monkeypatch):
+    images, _ = versions(tmp_path)
+    monkeypatch.setattr(images, "_nvidia_missing", lambda: (_ for _ in ()).throw(OSError("boom")))
+    row = next(r for r in images.status() if r["version"] == "13")
+    assert row["features"]["nvidia"]["available"] is False and "could not be checked (OSError: boom)" in row["features"]["nvidia"]["reason"]

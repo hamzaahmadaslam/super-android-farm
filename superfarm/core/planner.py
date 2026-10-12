@@ -73,7 +73,8 @@ def boot_arguments(r: Resolved, gpu: GpuLike) -> list[str]:
         "androidboot.redroid_height": str(r.height),
         "androidboot.redroid_dpi": str(r.dpi),
         # Stock images read the frame rate from this argument. An image with its own
-        # compositor patch may read another property; pass that one via android.extra_boot_args.
+        # compositor patch may read another property: name it in android.images.<version>
+        # .fps_property and resolve() adds it to r.boot_args with the same value.
         "androidboot.redroid_fps": str(r.fps),
     }
     for source, args in (("GPU", gpu.boot_args), ("device identity", boot_props(r.device)), ("extra", r.boot_args)):

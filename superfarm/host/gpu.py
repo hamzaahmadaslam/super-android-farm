@@ -10,6 +10,16 @@ What works, and why the modes differ:
 * software: ANGLE on SwiftShader, on the CPU. Always works; costs about five times the
   CPU of a GPU mode while the screen is being drawn.
 
+What an Android can be told to use (gpu.mode for the farm, gpu_mode per Android):
+
+    auto       the best that works now; gpu.prefer says whether a discrete card or the
+               integrated GPU is tried first
+    software   the CPU
+    igpu       the integrated GPU, whoever made it
+    dgpu       a discrete card, whoever made it (NVIDIA through the relay, AMD/Intel through Mesa)
+    intel / amd / nvidia   a GPU of that vendor
+    gpu_node   pins one exact card; it must be a card the mode allows
+
 Detection reads sysfs only (/sys/class/drm/renderD*/device), so it needs no tools and no
 privileges, and `sysfs` can be pointed at a fake tree in tests. choose() is deterministic:
 the same Android gets the same card at every start unless the configuration changes,
@@ -34,12 +44,23 @@ DRIVER_VENDOR = {"i915": "intel", "xe": "intel", "amdgpu": "amd", "radeon": "amd
 # Drivers Android's Mesa can render with through redroid's `host` mode.
 MESA_DRIVERS = {"i915", "xe", "amdgpu", "radeon"}
 VENDOR_LABEL = {"intel": "Intel", "amd": "AMD", "nvidia": "NVIDIA", "other": "GPU"}
+VENDOR_MODES = ("intel", "amd", "nvidia")
+KIND_MODES = ("igpu", "dgpu")
+KIND_LABEL = {"igpu": "integrated", "dgpu": "discrete"}
+SOFTWARE_LABEL = "CPU only (software rendering)"
+# AMD's processor-side vendor id. The graphics part of an AMD processor (0x1002) shares its
+# PCI slot with functions that carry this id; a graphics card never does.
+AMD_CPU_VENDOR = "0x1022"
+# A card on PCI bus 00 that reports this much memory of its own is a discrete card handed
+# to a virtual machine, not processor graphics (whose carve-out of system RAM is smaller).
+PASSTHROUGH_VRAM_MB = 3072
 
 BOOT_SOFTWARE = "androidboot.redroid_gpu_mode=guest"
 BOOT_HOST = "androidboot.redroid_gpu_mode=host"
 BOOT_VENUS = "androidboot.redroid_gpu_mode=venus"
 
 _RENDER = re.compile(r"^renderD(\d+)$")
+_PCI = re.compile(r"^[0-9a-f]{4}:([0-9a-f]{2}):[0-9a-f]{2}\.[0-9a-f]$")
 
 
 @dataclass
@@ -49,19 +70,32 @@ class GpuInfo:
     vendor: str                      # intel | amd | nvidia | other
     name: str
     pci: str                         # PCI address, e.g. 0000:01:00.0 ("" for non-PCI devices)
-    usable_modes: list[str] = field(default_factory=list)   # gpu modes this card can serve
-    discrete: bool = False           # a card with its own memory (heuristic for Intel/AMD)
-    vram_mb: int = 0                 # dedicated memory; 0 = unknown or shared with system RAM
+    usable_modes: list[str] = field(default_factory=list)   # vendor modes this card can serve
+    discrete: bool = False           # a card of its own (always for NVIDIA; by PCI position for Intel/AMD)
+    vram_mb: int | None = None       # the card's own memory; None = unknown or shared with system RAM
     note: str = ""                   # why usable_modes is empty, when it is
+    # Graphics inside the processor. Derived, so the two flags cannot disagree: an Intel, AMD
+    # or NVIDIA GPU is one or the other; neither flag is set for anything else (a virtual GPU).
+    integrated: bool = field(init=False, default=False)
+
+    def __post_init__(self) -> None:
+        self.integrated = self.vendor in VENDOR_MODES and not self.discrete
+
+    @property
+    def kind(self) -> str:
+        """igpu | dgpu | "" (a device that is neither, e.g. a virtual GPU)."""
+        return "igpu" if self.integrated else "dgpu" if self.discrete else ""
 
 
 @dataclass
 class GpuChoice:
-    mode: str                        # concrete: software | intel | amd | nvidia
+    mode: str                        # concrete backend: software | intel | amd | nvidia
     node: str                        # render node used ("" for software)
     run_args: list[str]              # extra `docker run` arguments for the Android container
     boot_args: list[str]             # androidboot.* arguments
     reason: str                      # one line for the panel: why this mode / card
+    kind: str = "cpu"                # cpu | igpu | dgpu
+    label: str = SOFTWARE_LABEL      # for the panel, e.g. "NVIDIA GeForce RTX 4080 SUPER (discrete, relay)"
 
 
 # ------------------------------------------------------------------ detection
@@ -91,17 +125,41 @@ def lspci_name(pci: str) -> str:
     return parts[2].strip() if r.ok and len(parts) >= 3 else ""
 
 
-def _is_discrete(vendor: str, pci: str, vram_mb: int) -> bool:
-    if vendor == "nvidia":
+def _amd_integrated(device: Path, pci: str, vram_mb: int | None) -> bool:
+    """Processor graphics or a Radeon card? No sysfs flag says so; PCI position does.
+
+    Rules in order (from the PCI layout of AMD systems; not exercised on AMD hardware here):
+    1. Since Zen, processor graphics is function 0 of a slot whose other functions are parts
+       of the processor (security processor, USB, audio) with AMD's processor vendor id.
+       A card's extra functions (HDMI audio, USB-C) all carry the graphics vendor id.
+    2. Older processor graphics sits directly on PCI bus 00, where no card can be plugged
+       in. The exception is a virtual machine, which shows a passed-through card on bus 00:
+       that one reports several GB of memory of its own.
+    3. Anything behind a PCIe port is a card.
+    Model names are deliberately not used: the same family name ("Vega") was sold as both."""
+    m = _PCI.match(pci)
+    if not m:
+        return False
+    try:
+        slot_dir = Path(os.path.realpath(device)).parent
+        siblings = [e for e in os.listdir(slot_dir) if e.startswith(pci.rsplit(".", 1)[0] + ".") and e != pci]
+    except OSError:
+        slot_dir, siblings = Path(), []
+    if any(_read(slot_dir / s / "vendor").lower() == AMD_CPU_VENDOR for s in siblings):
         return True
-    if vendor == "intel":
-        # Intel's integrated graphics has sat at 00:02.0 on every platform; Arc cards do not.
-        return not pci.endswith(":00:02.0")
-    if vendor == "amd":
-        # No clean flag exists. An APU reports a small carve-out of system RAM as VRAM
-        # (typically 512 MB - 2 GB); discrete cards worth preferring have more.
-        return vram_mb >= 3072
+    if m.group(1) == "00":
+        return not (vram_mb is not None and vram_mb >= PASSTHROUGH_VRAM_MB)
     return False
+
+
+def _is_integrated(vendor: str, device: Path, pci: str, vram_mb: int | None) -> bool:
+    if vendor == "intel":
+        # Intel's processor graphics has been PCI device 00:02.0 on every platform; Arc cards
+        # sit behind a PCIe port.
+        return pci.endswith(":00:02.0")
+    if vendor == "amd":
+        return _amd_integrated(device, pci, vram_mb)
+    return False                     # NVIDIA sells no processor graphics for PCs; others are neither
 
 
 def detect_gpus(sysfs: Path | str = "/sys", *, dev: Path | str = "/dev",
@@ -126,15 +184,15 @@ def detect_gpus(sysfs: Path | str = "/sys", *, dev: Path | str = "/dev",
         vendor = DRIVER_VENDOR.get(driver) or VENDOR_IDS.get(vendor_id, "other")
         if driver == "nouveau":
             vendor = "nvidia"
-        pci = ue.get("PCI_SLOT_NAME", "")
+        pci = ue.get("PCI_SLOT_NAME", "").lower()
         if not pci:
             try:
                 tail = os.path.basename(os.path.realpath(device))
-                pci = tail if re.match(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$", tail) else ""
+                pci = tail if _PCI.match(tail) else ""
             except OSError:
                 pci = ""
-        vram_bytes = _read(device / "mem_info_vram_total")      # amdgpu / radeon publish this
-        vram_mb = int(vram_bytes) // (1024 * 1024) if vram_bytes.isdigit() else 0
+        vram_bytes = _read(device / "mem_info_vram_total")      # amdgpu publishes this
+        vram_mb = int(vram_bytes) // (1024 * 1024) if vram_bytes.isdigit() else None
         pci_id = ue.get("PCI_ID", "").lower() or f"{vendor_id[2:]}:{_read(device / 'device')[2:]}".strip(":")
         name = (namer(pci) if namer else "") or f"{VENDOR_LABEL.get(vendor, 'GPU')} GPU [{pci_id or driver or 'unknown'}]"
         modes: list[str] = []
@@ -149,9 +207,10 @@ def detect_gpus(sysfs: Path | str = "/sys", *, dev: Path | str = "/dev",
             note = "no kernel driver is bound to this card"
         else:
             note = f"driver {driver} is not one Android's Mesa can render with"
+        integrated = _is_integrated(vendor, device, pci, vram_mb)
         out.append(GpuInfo(node=str(Path(dev) / "dri" / entry), driver=driver, vendor=vendor, name=name, pci=pci,
-                           usable_modes=modes, discrete=_is_discrete(vendor, pci, vram_mb), vram_mb=vram_mb,
-                           note=note))
+                           usable_modes=modes, discrete=vendor in VENDOR_MODES and not integrated,
+                           vram_mb=vram_mb, note=note))
     return out
 
 
@@ -175,8 +234,25 @@ def nvidia_vram(gpus: list[GpuInfo], runner: Callable[..., proc.Result] | None =
             by_pci[bus.lower()[-12:]] = int(mem)
     for g in gpus:
         if g.vendor == "nvidia" and not g.vram_mb:
-            g.vram_mb = by_pci.get(g.pci.lower(), 0)
+            g.vram_mb = by_pci.get(g.pci.lower()) or None
     return gpus
+
+
+# ------------------------------------------------------------------ naming
+
+def display_name(g: GpuInfo) -> str:
+    """Vendor + marketing name: "AD103 [GeForce RTX 4080 SUPER]" -> "NVIDIA GeForce RTX 4080 SUPER"."""
+    vendor = VENDOR_LABEL.get(g.vendor, "GPU")
+    if g.name.startswith(vendor):
+        return g.name                # our own fallback name, or a name that already says it
+    m = re.search(r"\[([^\]]+)\]\s*$", g.name)
+    return f"{vendor} {m.group(1) if m else g.name}".strip()
+
+
+def card_label(g: GpuInfo) -> str:
+    kind = KIND_LABEL.get(g.kind, "")
+    how = "relay" if g.vendor == "nvidia" else "Mesa"
+    return f"{display_name(g)} ({', '.join(p for p in (kind, how) if p)})"
 
 
 # ------------------------------------------------------------------ choosing
@@ -199,7 +275,8 @@ def _software(reason: str) -> GpuChoice:
 
 def _mesa(g: GpuInfo, reason: str) -> GpuChoice:
     return GpuChoice(mode=g.vendor, node=g.node, run_args=["--device", g.node],
-                     boot_args=[BOOT_HOST, f"androidboot.redroid_gpu_node={g.node}"], reason=reason)
+                     boot_args=[BOOT_HOST, f"androidboot.redroid_gpu_node={g.node}"], reason=reason,
+                     kind=g.kind, label=card_label(g))
 
 
 def _nvidia(g: GpuInfo, config: Config, paths: Paths, reason: str) -> GpuChoice:
@@ -207,17 +284,83 @@ def _nvidia(g: GpuInfo, config: Config, paths: Paths, reason: str) -> GpuChoice:
     if config.gpu.nvidia.debug:
         boot.append("androidboot.redroid_gpu_debug=1")       # read by gpu_config.sh's venus branch
     return GpuChoice(mode="nvidia", node=g.node, run_args=venus.container_mounts(config, paths, g.node),
-                     boot_args=boot, reason=reason)
+                     boot_args=boot, reason=reason, kind="dgpu", label=card_label(g))
 
 
 def _nvidia_blocker(runtime: dict) -> str:
     """Why NVIDIA mode cannot be used right now ("" = it can)."""
     if not runtime.get("ready"):
-        return (f"the Venus runtime or relay is not built ({', '.join(runtime.get('missing', [])) or 'files missing'}); "
-                f"{venus.BUILD_HINT}")
+        # Names only, and only a few: this line is shown in the panel's picker. `sf doctor`
+        # lists the full paths.
+        missing = [os.path.basename(m) for m in runtime.get("missing", [])]
+        listed = ", ".join(missing[:3]) + (f" and {len(missing) - 3} more" if len(missing) > 3 else "")
+        return f"the Venus runtime or relay is not built ({listed or 'files'} missing); {venus.BUILD_HINT}"
     if not runtime.get("icd", True):
         return f"the NVIDIA Vulkan driver manifest {runtime.get('icd_path', '')} is missing; install the NVIDIA driver"
     return ""
+
+
+def _fits(g: GpuInfo, mode: str) -> bool:
+    """Whether a usable card may serve a requested mode."""
+    if not g.usable_modes:
+        return False
+    if mode in KIND_MODES:
+        return g.kind == mode
+    return mode in g.usable_modes
+
+
+def _tiers(mode: str, prefer: str) -> tuple[str, ...]:
+    """The requested mode as an ordered list of modes to try."""
+    if mode == "auto":
+        return ("dgpu", "igpu") if prefer == "dgpu" else ("igpu", "dgpu")
+    return (mode,)
+
+
+def _serve(mode: str, cards: list[GpuInfo], prefer: str, runtime: dict,
+           pick: Callable[[list[GpuInfo]], GpuInfo],
+           start_relay: Callable[[GpuInfo], str]) -> tuple[GpuInfo | None, str, list[str]]:
+    """The card that serves `mode` now: (card, tier it came from, why others were passed over).
+
+    Within a tier NVIDIA cards are tried first (they are the fastest when the relay is
+    there); a card whose relay is not built or does not start is passed over with the
+    reason, never silently."""
+    skipped: list[str] = []
+    for tier in _tiers(mode, prefer):
+        fitting = [g for g in cards if _fits(g, tier)]
+        nvidia = [g for g in fitting if g.vendor == "nvidia"]
+        if nvidia:
+            blocker = _nvidia_blocker(runtime)
+            if not blocker:
+                g = pick(nvidia)
+                blocker = start_relay(g)
+                if not blocker:
+                    return g, tier, skipped
+            skipped.append(f"NVIDIA skipped: {blocker}")
+        mesa = [g for g in fitting if g.vendor != "nvidia"]
+        if mesa:
+            return pick(mesa), tier, skipped
+    return None, "", skipped
+
+
+def available_modes(gpus: list[GpuInfo], runtime: dict, prefer: str = "dgpu") -> list[str]:
+    """Modes that would work right now, in the order the panel lists them."""
+    def first(c: list[GpuInfo]) -> GpuInfo:
+        return c[0]
+    return ["auto", "software"] + [m for m in (*KIND_MODES, *VENDOR_MODES)
+                                   if _serve(m, gpus, prefer, runtime, first, lambda g: "")[0] is not None]
+
+
+def _what_is_missing(mode: str, pool: list[GpuInfo], forced: str) -> str:
+    what = {"igpu": "an integrated GPU", "dgpu": "a discrete GPU", "intel": "an Intel GPU with a Mesa driver",
+            "amd": "an AMD GPU with a Mesa driver", "nvidia": "an NVIDIA card with NVIDIA's own driver"}[mode]
+    if forced:
+        g = pool[0]
+        kind = f"{KIND_LABEL[g.kind]} " if g.kind else ""
+        return (f"{forced} is {display_name(g)} ({kind}{VENDOR_LABEL.get(g.vendor, g.vendor)} card, driver "
+                f"{g.driver or 'none'}), not {what}: it cannot be used in {mode!r} mode"
+                + (f" ({g.note})" if g.note else ""))
+    notes = "; ".join(dict.fromkeys(g.note for g in pool if g.note))
+    return f"gpu mode {mode!r} needs {what}, and this machine has none" + (f" ({notes})" if notes else "")
 
 
 def choose(r: Resolved, config: Config, paths: Paths, *, counts: dict[str, int] | None = None,
@@ -230,14 +373,16 @@ def choose(r: Resolved, config: Config, paths: Paths, *, counts: dict[str, int] 
     ensure_relay  called for NVIDIA choices so the relay is up before the Android starts;
                   pass None to only plan (no process is started)
 
-    `auto` resolves to the best mode that works *now*; a mode that was asked for by name
-    and is unavailable raises ValueError saying why and what to do.
+    `auto` resolves to the best mode that works *now*, falling back to the CPU. A mode that
+    was asked for by name and is unavailable raises ValueError saying what is missing and
+    which choices this machine does offer.
     """
     mode = r.gpu_mode
     if mode == "software":
         return _software("software rendering was requested")
     gpus = detect_gpus() if gpus is None else gpus
     runtime = venus.runtime_status(config, paths) if runtime is None else runtime
+    valid = f"Valid choices on this machine: {', '.join(available_modes(gpus, runtime, config.gpu.prefer))}."
     forced = r.gpu_node
     pool = gpus
     if forced:
@@ -257,67 +402,87 @@ def choose(r: Resolved, config: Config, paths: Paths, *, counts: dict[str, int] 
             return str(e)
         return ""
 
-    if mode in ("intel", "amd"):
-        cands = [g for g in pool if mode in g.usable_modes]
-        if not cands:
+    card, tier, skipped = _serve(mode, pool, config.gpu.prefer, runtime,
+                                 lambda cands: _pick(cands, r, config, counts), start_relay)
+    if card is None:
+        if mode == "auto":
             if forced:
-                g = pool[0]
-                raise ValueError(f"{forced} is a {VENDOR_LABEL.get(g.vendor, g.vendor)} card (driver "
-                                 f"{g.driver or 'none'}), not usable in {mode} mode")
-            raise ValueError(f"gpu mode {mode!r} requested but no {VENDOR_LABEL[mode]} GPU with a Mesa driver "
-                             f"was found; run `sf doctor`, or set gpu.mode to auto")
-        g = _pick(cands, r, config, counts)
-        return _mesa(g, f"{g.name} via Mesa ({g.driver})")
+                why = skipped[0] if skipped else (pool[0].note or "it cannot be used by Android")
+                raise ValueError(f"render node {forced} was requested but cannot be used: {why}. {valid}")
+            return _software("; ".join(["auto: no usable GPU, drawing on the CPU", *skipped]))
+        if skipped:
+            # The card is there; what serves it is not.
+            reasons = "; ".join(s.removeprefix("NVIDIA skipped: ") for s in skipped)
+            raise ValueError(f"gpu mode {mode!r} is not available: {reasons}. {valid}")
+        raise ValueError(f"{_what_is_missing(mode, pool, forced)}. {valid}")
 
-    if mode == "nvidia":
-        cands = [g for g in pool if "nvidia" in g.usable_modes]
-        if not cands:
-            note = next((g.note for g in pool if g.vendor == "nvidia" and g.note), "")
-            raise ValueError("gpu mode 'nvidia' requested but no NVIDIA card with NVIDIA's driver was found"
-                             + (f" ({note})" if note else "") + "; run `sf doctor`")
-        blocker = _nvidia_blocker(runtime)
-        if blocker:
-            raise ValueError(f"gpu mode 'nvidia' is not available: {blocker}")
-        g = _pick(cands, r, config, counts)
-        failed = start_relay(g)
-        if failed:
-            raise ValueError(f"gpu mode 'nvidia' is not available: {failed}")
-        return _nvidia(g, config, paths, f"{g.name} through the Venus relay")
+    how = "through the Venus relay" if card.vendor == "nvidia" else f"via Mesa ({card.driver})"
+    lead = f"auto: {KIND_LABEL[tier]} " if mode == "auto" else ""
+    reason = "; ".join([f"{lead}{card.name} {how}", *skipped])
+    return _nvidia(card, config, paths, reason) if card.vendor == "nvidia" else _mesa(card, reason)
 
-    # auto: nvidia (only when runtime + relay exist) > discrete AMD/Intel > integrated > software
-    skipped: list[str] = []
-    nvidia = [g for g in pool if "nvidia" in g.usable_modes]
-    if nvidia:
-        blocker = _nvidia_blocker(runtime)
-        if not blocker:
-            g = _pick(nvidia, r, config, counts)
-            blocker = start_relay(g)
-            if not blocker:
-                return _nvidia(g, config, paths, f"auto: {g.name} through the Venus relay")
-        skipped.append(f"NVIDIA skipped: {blocker}")
-    mesa = [g for g in pool if g.usable_modes and g.vendor in ("intel", "amd")]
-    for tier, label in (([g for g in mesa if g.discrete], "discrete"), ([g for g in mesa if not g.discrete], "integrated")):
-        if tier:
-            g = _pick(tier, r, config, counts)
-            return _mesa(g, "; ".join([f"auto: {label} {g.name} via Mesa ({g.driver})", *skipped]))
-    if forced:
-        g = pool[0]
-        why = skipped[0] if skipped else (g.note or "it cannot be used by Android")
-        raise ValueError(f"render node {forced} was requested but cannot be used: {why}")
-    return _software("; ".join(["auto: no usable GPU, drawing on the CPU", *skipped]))
+
+def planned_mode(config: Config, gpus: list[GpuInfo]) -> str:
+    """The backend the farm's default gpu.mode aims for, judged from the cards alone (the
+    NVIDIA runtime is assumed built). For capacity planning; starts nothing, reads no files."""
+    mode = config.gpu.mode
+    if mode == "software" or mode in VENDOR_MODES:
+        return mode
+    card, _, _ = _serve(mode, gpus, config.gpu.prefer, {"ready": True, "icd": True}, lambda c: c[0], lambda g: "")
+    return card.vendor if card else "software"
+
+
+def options(config: Config, paths: Paths, *, gpus: list[GpuInfo] | None = None,
+            runtime: dict | None = None) -> list[dict]:
+    """Every rendering choice for this machine, for the per-Android and bulk pickers.
+
+    Each entry is {value, label, available, reason, node}. `value` is a gpu mode. Entries
+    with an empty `node` are the modes; they are followed by one entry per card (`node` set,
+    `value` the card's vendor mode): choosing one means gpu_mode=value and gpu_node=node,
+    which pins that exact card. `reason` says why an entry is unavailable. Starts nothing."""
+    gpus = detect_gpus() if gpus is None else gpus
+    runtime = venus.runtime_status(config, paths) if runtime is None else runtime
+    prefer = config.gpu.prefer
+
+    def first(cands: list[GpuInfo]) -> GpuInfo:
+        return cands[0]
+
+    def entry(value: str, title: str, cards: list[GpuInfo], node: str = "") -> dict:
+        card, _, skipped = _serve(value, cards, prefer, runtime, first, lambda g: "")
+        named = [display_name(g) for g in cards if _fits(g, value)]
+        if card is not None:
+            reason = ""
+        elif skipped:
+            reason = "; ".join(s.removeprefix("NVIDIA skipped: ") for s in skipped)
+        else:
+            reason = _what_is_missing(value, cards, node)
+        label = title + (f": {', '.join(dict.fromkeys(named))}" if named and not node else "")
+        return {"value": value, "label": label, "available": card is not None, "reason": reason, "node": node}
+
+    auto, _, auto_skipped = _serve("auto", gpus, prefer, runtime, first, lambda g: "")
+    out = [
+        {"value": "auto", "label": f"Automatic (now: {card_label(auto) if auto else SOFTWARE_LABEL})",
+         "available": True, "reason": "; ".join(auto_skipped), "node": ""},
+        {"value": "software", "label": SOFTWARE_LABEL, "available": True, "reason": "", "node": ""},
+        entry("igpu", "Integrated GPU", gpus),
+        entry("dgpu", "Discrete GPU", gpus),
+        entry("intel", "Intel GPU (Mesa)", gpus),
+        entry("amd", "AMD GPU (Mesa)", gpus),
+        entry("nvidia", "NVIDIA GPU (relay)", gpus),
+    ]
+    for g in gpus:
+        if g.vendor not in VENDOR_MODES:
+            continue                 # no mode can name it (a virtual GPU, for instance)
+        out.append(entry(g.vendor, f"{card_label(g)} on {os.path.basename(g.node)}", [g], g.node))
+    return out
 
 
 def summary(config: Config, paths: Paths, gpus: list[GpuInfo] | None = None) -> dict:
     """What the panel's host page shows: cards, modes available now, and the auto pick."""
     gpus = nvidia_vram(detect_gpus()) if gpus is None else gpus
     runtime = venus.runtime_status(config, paths)
-    available = ["software"]
-    for g in gpus:
-        for m in g.usable_modes:
-            if m == "nvidia" and _nvidia_blocker(runtime):
-                continue
-            if m not in available:
-                available.append(m)
+    # `auto` always works and is not a statement about the hardware, so it is left out here.
+    available = [m for m in available_modes(gpus, runtime, config.gpu.prefer) if m != "auto"]
     return {"gpus": [g.__dict__ for g in gpus], "available_modes": available,
             "nvidia_runtime": runtime, "nvidia_blocker": _nvidia_blocker(runtime) if any(
                 g.vendor == "nvidia" for g in gpus) else ""}

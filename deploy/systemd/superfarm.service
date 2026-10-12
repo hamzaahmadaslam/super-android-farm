@@ -1,38 +1,61 @@
 # Super Farm daemon: the web panel, the API and everything that talks to Docker and ADB.
 #
-# Installed by `sudo sf host apply`, which fills in the placeholder fields. Not enabled
-# automatically:  sudo systemctl enable --now superfarm.service
+# This is a systemd *user* unit. It is installed without root by
+#     sf service install        (writes ~/.config/systemd/user/superfarm.service and enables it)
+# and controlled with `sf service start|stop|status|logs` or `systemctl --user ... superfarm`.
 #
-# Why it runs as the desktop user and not as root: the earlier, root-run panels had no
-# display and no sound, so native device windows (scrcpy) and "listen to a device" did not
-# work. The daemon needs nothing root-only at run time: Docker through the docker group,
-# GPU and camera devices through the video/render groups.
+# Why a user service and not a system service with User=:
+#   The daemon opens device windows (scrcpy) on your desktop and plays a device's sound on
+#   your speakers. Both belong to your login session. A user service is started by your own
+#   service manager, which already holds the session's environment: XDG_RUNTIME_DIR (where
+#   the PipeWire/PulseAudio and Wayland sockets live) and the session bus are always set,
+#   and DISPLAY, WAYLAND_DISPLAY and XAUTHORITY are there once the desktop has announced
+#   them (see "Display" below). A system service has none of that and would have to guess.
+#   Nothing the daemon does needs root: Docker through the docker group, GPU and camera
+#   devices through the video/render groups.
+#
+# Display (native windows):
+#   A service inherits the user manager's environment at the moment it starts. GNOME, KDE
+#   Plasma and X sessions started through the distribution's xinit scripts publish DISPLAY /
+#   WAYLAND_DISPLAY / XAUTHORITY to the user manager at login. Sessions that do not (a bare
+#   sway or i3 started from a console) need this line in their startup file:
+#       systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY
+#   `sf service install` runs it once for the session it is called from.
+#   A daemon that started before the desktop did keeps the environment it started with;
+#   if windows do not open, restart it once after logging in:
+#       systemctl --user restart superfarm
+#   The web panel, the API and every Android are unaffected by any of this.
+#
+# At boot, without logging in (headless machines, or a farm that must survive logout):
+#       loginctl enable-linger "$USER"
+#   keeps your user manager, and so this service, running from boot until shutdown. Without
+#   it the service starts at your first login and stops when your last session ends. The
+#   Androids are Docker containers and keep running either way; what stops with the user
+#   manager is the panel, running automation and the NVIDIA relay (NVIDIA Androids lose
+#   their picture until they are restarted). Use linger for anything long-running.
+#
+# Programs outside the standard PATH (for example an scrcpy unpacked into ~/.local/bin):
+#   the user manager does not read your shell profile. Add the folder for all user services:
+#       mkdir -p ~/.config/environment.d
+#       echo 'PATH=$HOME/.local/bin:$PATH' > ~/.config/environment.d/60-path.conf
+#   then log out and in.
 
 [Unit]
 Description=Super Farm daemon (Android container farm)
-Requires=docker.service
-Wants=network-online.target superfarm-host.service
-After=docker.service network-online.target superfarm-host.service
+# A user unit cannot be ordered after a system unit such as docker.service, so the daemon
+# must not assume Docker is already up when it starts.
 
 [Service]
 Type=simple
-User=@USER@
-Group=@GROUP@
-SupplementaryGroups=@SUPPLEMENTARY_GROUPS@
 Environment=SUPERFARM_HOME=@SUPERFARM_HOME@
-# The user's session: sound (PipeWire/PulseAudio sockets), Wayland and the session bus all
-# live under this folder. It exists while the user is logged in (or lingering is enabled).
-Environment=XDG_RUNTIME_DIR=/run/user/@UID@
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus
-# Optional overrides, one VAR=value per line: DISPLAY, WAYLAND_DISPLAY, XAUTHORITY.
-# A login script can refresh it:
-#   systemctl --user show-environment | grep -E '^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY)=' > session.env
-EnvironmentFile=-@SUPERFARM_HOME@/session.env
 ExecStart=@SF_BIN@ serve
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
-LimitNOFILE=1048576
+# The default soft limit of 1024 open files is too small for hundreds of ADB connections
+# and live views. 65536 is within the hard limit every supported distribution gives a
+# user manager (524288), which a user unit cannot exceed.
+LimitNOFILE=65536
 UMask=0027
 
 # Stop and restart only the daemon itself. The NVIDIA relay is started by the daemon and
@@ -40,32 +63,16 @@ UMask=0027
 # group) a daemon restart would take the graphics of all of them down.
 KillMode=process
 
-# ---- hardening that the daemon's work is compatible with
+# The daemon never runs a setuid program.
 NoNewPrivileges=true
-ProtectSystem=full
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-ProtectHostname=true
-RestrictSUIDSGID=true
-RestrictRealtime=true
-RestrictNamespaces=true
-LockPersonality=true
-SystemCallArchitectures=native
-# Private /tmp, with the X11 socket folder let back in for scrcpy windows on X/XWayland.
-# Consequence to keep in mind: a path under /tmp handed to `docker run -v` would name the
-# *host's* /tmp, not this one. The farm keeps everything it mounts under SUPERFARM_HOME
-# and /run/superfarm for that reason.
-PrivateTmp=true
-BindReadOnlyPaths=-/tmp/.X11-unix
 
 # ---- deliberately NOT set
-# PrivateDevices / DevicePolicy / ProtectClock: each one switches on a device allow-list,
-#   which would hide /dev/dri/renderD*, /dev/nvidia*, /dev/video* and /dev/snd.
-# ProtectHome: the farm home normally lives in the user's home directory.
-# MemoryDenyWriteExecute: the NVIDIA driver inside the relay generates code at run time.
-# CapabilityBoundingSet: the process has no capabilities to begin with (plain user).
+# ProtectSystem / ProtectHome / PrivateTmp / PrivateDevices / Protect*: in a user unit
+#   systemd implements each of these with an unprivileged user namespace. Whether that is
+#   allowed depends on the distribution's policy (it worked on Ubuntu 26.04 with systemd
+#   259; not tried elsewhere), the daemon's groups appear unmapped inside it, and a private
+#   /tmp or /dev would hide the X11 socket folder and the GPU and camera devices. For a
+#   process that controls Docker anyway the gain does not justify a unit that may not start.
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
