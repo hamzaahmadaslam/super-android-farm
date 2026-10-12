@@ -5,9 +5,11 @@
 // is put back on the same row's control.
 
 import { h, parseSelector, replace, selectorOf, uid } from '../dom.js';
+import { icon } from '../icons.js';
+import { help } from './help.js';
 
 // columns: [{ title, cell(row) -> node | text, class? }]
-export function dataTable({ columns, key = (row) => row.id, selectable = false, empty, label }) {
+export function dataTable({ columns, key = (row) => row.id, selectable = false, empty, label, dense = false }) {
   const selection = new Set();
   const listeners = [];
   let rows = [];
@@ -15,7 +17,7 @@ export function dataTable({ columns, key = (row) => row.id, selectable = false, 
     setSelection(all.checked ? rows.map(key) : []);
   } });
   const body = h('tbody');
-  const table = h('table', { 'aria-label': label },
+  const table = h('table', { 'aria-label': label, class: dense ? 'dense' : '' },
     h('thead', null, h('tr', null,
       selectable && h('th', { class: 'check', scope: 'col' }, all),
       columns.map((column) => h('th', { scope: 'col', class: column.class }, column.title)))),
@@ -115,6 +117,7 @@ export function selectorBox(target, instances) {
     } catch (error) {
       input.setCustomValidity(error.message);
       input.reportValidity();
+      hint.textContent = error.message;
     }
   };
   input.addEventListener('keydown', (event) => {
@@ -125,6 +128,6 @@ export function selectorBox(target, instances) {
     if (document.activeElement !== input) input.value = selectorOf(selection);
     hint.textContent = selection.size ? `${selection.size} selected` : 'none selected';
   });
-  return h('span', { class: 'row grow selector-wrap' },
-    h('label', { for: id, class: 'visually-hidden' }, 'Selection (selector)'), input, hint);
+  return h('span', { class: 'row selector-wrap' },
+    h('label', { for: id, class: 'small muted nowrap' }, icon('check'), ' Select'), input, help('selector'), hint);
 }

@@ -14,7 +14,9 @@ Every name in the tables below is checked against the real package index of one 
 per family by tests/distro/run.sh (Ubuntu 24.04, Debian 12, Fedora 44, Arch, openSUSE
 Tumbleweed, each in a throwaway container): the required and optional sets are really
 installed there, the rest is resolved without installing. Not covered by that check: the
-kernel header packages (named after the running kernel) and the RHEL-family hints.
+exact kernel header package (named after the running kernel, which in a container is the
+host's; only the package of the distribution's own default kernel is resolved) and the
+RHEL-family hints.
 """
 from __future__ import annotations
 

@@ -221,3 +221,17 @@ def test_cpu_model_reads_proc_cpuinfo(tmp_path):
     f.write_text("processor\t: 0\nmodel name\t: Example CPU 9000\n")
     assert farm_mod._cpu_model(f) == "Example CPU 9000"
     assert isinstance(farm_mod._cpu_model(tmp_path / "missing"), str)
+
+
+def test_trusted_proxies_are_addresses_or_networks_and_need_a_daemon_restart():
+    assert Config().server.trusted_proxies == []
+    ok = Config.model_validate({"server": {"trusted_proxies": ["127.0.0.1", "::1", "10.0.0.0/8"]}})
+    assert config_effects(Config(), ok)["restart_daemon"] == ["server.trusted_proxies"]
+    for bad in ("*", "proxy.example", "10.0.0.0/33", ""):
+        with pytest.raises(ValueError, match="trusted_proxies"):
+            Config.model_validate({"server": {"trusted_proxies": [bad]}})
+
+
+def test_the_settings_say_what_the_api_token_is_worth():
+    text = Config.model_json_schema()["$defs"]["ServerConfig"]["properties"]["host"]["description"]
+    assert "root" in text and "API token" in text

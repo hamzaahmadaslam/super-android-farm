@@ -7,7 +7,16 @@ import time
 import pytest
 from pydantic import ValidationError
 
-from superfarm.config import Config, get_value, load_config, save_config, set_value, update_config
+from superfarm.config import (
+    API_IMMUTABLE_KEYS,
+    Config,
+    check_api_patch,
+    get_value,
+    load_config,
+    save_config,
+    set_value,
+    update_config,
+)
 from superfarm.core.models import InstanceSpec, check_id, parse_selector, resolve
 from superfarm.core.store import Store
 from superfarm.core.tasks import TaskManager, run_on_instances
@@ -30,6 +39,48 @@ def test_auth_cannot_be_disabled_on_a_public_address():
     with pytest.raises(ValidationError):
         Config.model_validate({"server": {"host": "0.0.0.0", "auth_required": False}})
     Config.model_validate({"server": {"host": "0.0.0.0", "auth_required": True}})
+
+
+def test_the_rtmp_ingest_stays_on_loopback_unless_remote_is_asked_for_by_name():
+    # ffmpeg's listener checks neither the app nor the stream key: reachable = usable by anyone.
+    camera = Config.model_fields["media"].annotation.model_fields["camera"].annotation
+    assert "no authentication" in camera.model_fields["rtmp_bind"].description
+    assert Config().media.camera.rtmp_allow_remote is False
+    for address in ("127.0.0.1", "127.0.0.9", "::1", "localhost"):
+        assert Config.model_validate({"media": {"camera": {"rtmp_bind": address}}}).media.camera.rtmp_bind == address
+    for address in ("0.0.0.0", "192.168.1.20", "::", "farm.example"):
+        with pytest.raises(ValidationError, match="media.camera.rtmp_allow_remote"):
+            Config.model_validate({"media": {"camera": {"rtmp_bind": address}}})
+        allowed = Config.model_validate({"media": {"camera": {"rtmp_bind": address, "rtmp_allow_remote": True}}})
+        assert allowed.media.camera.rtmp_bind == address
+    with pytest.raises(ValidationError, match="rtmp_allow_remote"):           # also when changed one key at a time
+        set_value(Config(), "media.camera.rtmp_bind", "0.0.0.0")
+    remote = Config.model_validate({"media": {"camera": {"rtmp_bind": "0.0.0.0", "rtmp_allow_remote": True}}})
+    with pytest.raises(ValidationError, match="rtmp_allow_remote"):
+        set_value(remote, "media.camera.rtmp_allow_remote", False)
+
+
+def test_settings_that_name_a_program_cannot_be_changed_by_an_api_patch():
+    config = Config()
+    assert "docker.binary" in API_IMMUTABLE_KEYS
+    for dotted in API_IMMUTABLE_KEYS:                                          # every listed key is a real setting
+        get_value(config, dotted)
+    for patch in ({"docker": {"binary": "/tmp/not-docker"}}, {"gpu": {"nvidia": {"relay_dir": "/tmp/relay"}}},
+                  {"gpu": {"nvidia": {"icd": "/tmp/icd.json"}}, "android": {"fps": 25}}):
+        with pytest.raises(ValueError, match="config.yaml or with `sf config set`"):
+            check_api_patch(config, patch)
+    # Everything else, and a patch that repeats the current value (a form sending all it shows), passes.
+    for patch in ({"android": {"fps": 25}}, {"docker": {"stop_timeout": 5}}, {"docker": {"binary": "docker"}},
+                  {"docker": {"binary": None}}, {"docker": None}, {"gpu": {"nvidia": {"debug": True}}}, {}):
+        check_api_patch(config, patch)
+    # `null` puts a setting back to its default, which is a change when it was set to something else.
+    custom = set_value(config, "docker.binary", "/usr/local/bin/docker")       # the config file and the CLI still can
+    check_api_patch(custom, {"docker": {"binary": "/usr/local/bin/docker", "stop_timeout": 5}})
+    for patch in ({"docker": {"binary": None}}, {"docker": None}, {"docker": {"binary": "docker"}}):
+        with pytest.raises(ValueError, match="docker.binary"):
+            check_api_patch(custom, patch)
+    with pytest.raises(ValueError, match="mapping"):
+        check_api_patch(config, ["docker"])
 
 
 def test_unknown_keys_are_rejected():
@@ -307,3 +358,26 @@ def test_current_app_parses_the_resumed_activity():
     adb = _RecordingAdb()
     adb.shell = lambda command, **kw: "  mResumedActivity: ActivityRecord{1a2b u0 com.android.settings/.Settings t12}\n"  # type: ignore[method-assign]
     assert adb.current_app() == ("com.android.settings", "com.android.settings.Settings")
+
+
+def test_a_saved_partial_entry_loads_again(tmp_path):
+    """Regression: saving after changing one field of an image entry wrote only that field,
+    and the file then failed to load ("android.images.13.base: Field required")."""
+    paths = get_paths(tmp_path).ensure()
+    c = update_config(Config(), {"android": {"images": {"13": {"tag": "local/android:13"}}}})
+    save_config(c, paths)
+    text = paths.config.read_text()
+    assert "base:" in text and "memory_mb" not in text     # the map is written whole, other sections not at all
+    again = load_config(paths)
+    assert again.android.images["13"].tag == "local/android:13"
+    assert again.android.images["13"].base == Config().android.images["13"].base
+    assert set(again.android.images) == set(Config().android.images)   # sibling versions kept
+    save_config(set_value(again, "server.session_hours", 13), paths)   # a second save must not lose it
+    assert load_config(paths).android.images["13"].tag == "local/android:13"
+
+
+def test_a_config_file_that_is_not_a_mapping_is_refused_clearly(tmp_path):
+    paths = get_paths(tmp_path).ensure()
+    paths.config.write_text("- just\n- a list\n")
+    with pytest.raises(ValueError, match="expected a mapping"):
+        load_config(paths)

@@ -24,9 +24,11 @@ import threading
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from ..util.files import inside, locked, read_yaml, write_yaml
+from ..util.files import inside, locked, write_yaml
+from . import plainyaml
 from .selectors import _ROLE_NAME, Selector, selector_from_node
 from .store import check_package
 from .ui import interesting
@@ -111,7 +113,11 @@ class Profiles:
         """The profile of a package; an empty one when nothing was taught yet."""
         if not package:
             raise ValueError("no package given")
-        data = read_yaml(self._file(package), None)
+        try:
+            data = plainyaml.read(self._file(package), None)
+        except yaml.YAMLError as e:
+            raise ValueError(f"the profile of {package} is not valid ({getattr(e, 'problem', None) or e}); fix or "
+                             f"delete {self._file(package).name} in the automation/profiles folder") from None
         if not isinstance(data, dict):
             return AppProfile(package=package)
         try:

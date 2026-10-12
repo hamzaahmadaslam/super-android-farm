@@ -13,7 +13,9 @@ export function parseHash(hash) {
 export const go = (path) => { location.hash = `#/${path}`; };
 
 // routes: { name: render(root, params, scope) }. A page registers what it starts on
-// the scope; leaving the page disposes it (timers, streams, listeners).
+// the scope; leaving the page disposes it (timers, streams, listeners). Every visit gets
+// an element of its own, so a slow page that finishes loading after the operator moved
+// on writes into nothing instead of into the next page.
 export function startRouter(root, routes, fallback, onChange) {
   const show = async () => {
     let { name, params } = parseHash(location.hash);
@@ -24,19 +26,30 @@ export function startRouter(root, routes, fallback, onChange) {
     if (current) current.dispose();
     const mine = scope();
     current = mine;
-    replace(root);
+    const page = h('div', { class: 'page' });
+    // Placeholders instead of a blank screen, but only when the page is not instant.
+    const wait = h('div', { class: 'stack', 'aria-busy': 'true', 'aria-label': 'Loading' },
+      h('span', { class: 'skeleton line w-40' }), h('span', { class: 'skeleton block' }), h('span', { class: 'skeleton block' }));
+    const waiting = setTimeout(() => { if (current === mine && !page.children.length) page.append(wait); }, 200);
+    const filled = new MutationObserver(() => { if ([...page.children].some((node) => node !== wait)) wait.remove(); });
+    filled.observe(page, { childList: true });
+    replace(root, page);
     onChange(name);
     try {
-      await routes[name](root, params, mine);
+      await routes[name](page, params, mine);
     } catch (error) {
       // Only report for the page still on screen; a slow page the operator already left is silent.
       if (current === mine) {
-        root.append(h('div', { class: 'banner fail', role: 'alert' },
+        page.append(h('div', { class: 'banner fail page-error', role: 'alert' },
           h('div', { class: 'grow' }, h('strong', null, 'This page could not be loaded. '), error.message),
           h('button', { class: 'btn', type: 'button', onclick: show }, 'Try again')));
       }
+    } finally {
+      clearTimeout(waiting);
+      filled.disconnect();
+      wait.remove();
     }
-    root.focus({ preventScroll: true });
+    if (current === mine) root.focus({ preventScroll: true });
   };
   window.addEventListener('hashchange', show);
   show();

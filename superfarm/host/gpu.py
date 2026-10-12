@@ -34,7 +34,7 @@ from pathlib import Path
 from collections.abc import Callable
 
 from ..config import Config
-from ..core.models import Resolved
+from ..core.models import InstanceSpec, Resolved, resolve
 from ..paths import Paths
 from ..util import proc
 from . import venus
@@ -48,6 +48,8 @@ VENDOR_MODES = ("intel", "amd", "nvidia")
 KIND_MODES = ("igpu", "dgpu")
 KIND_LABEL = {"igpu": "integrated", "dgpu": "discrete"}
 SOFTWARE_LABEL = "CPU only (software rendering)"
+# How a GpuChoice.reason starts the part about an NVIDIA card that was passed over.
+NVIDIA_SKIPPED = "NVIDIA skipped: "
 # AMD's processor-side vendor id. The graphics part of an AMD processor (0x1002) shares its
 # PCI slot with functions that carry this id; a graphics card never does.
 AMD_CPU_VENDOR = "0x1022"
@@ -335,7 +337,7 @@ def _serve(mode: str, cards: list[GpuInfo], prefer: str, runtime: dict,
                 blocker = start_relay(g)
                 if not blocker:
                     return g, tier, skipped
-            skipped.append(f"NVIDIA skipped: {blocker}")
+            skipped.append(NVIDIA_SKIPPED + blocker)
         mesa = [g for g in fitting if g.vendor != "nvidia"]
         if mesa:
             return pick(mesa), tier, skipped
@@ -412,7 +414,7 @@ def choose(r: Resolved, config: Config, paths: Paths, *, counts: dict[str, int] 
             return _software("; ".join(["auto: no usable GPU, drawing on the CPU", *skipped]))
         if skipped:
             # The card is there; what serves it is not.
-            reasons = "; ".join(s.removeprefix("NVIDIA skipped: ") for s in skipped)
+            reasons = "; ".join(s.removeprefix(NVIDIA_SKIPPED) for s in skipped)
             raise ValueError(f"gpu mode {mode!r} is not available: {reasons}. {valid}")
         raise ValueError(f"{_what_is_missing(mode, pool, forced)}. {valid}")
 
@@ -422,14 +424,17 @@ def choose(r: Resolved, config: Config, paths: Paths, *, counts: dict[str, int] 
     return _nvidia(card, config, paths, reason) if card.vendor == "nvidia" else _mesa(card, reason)
 
 
-def planned_mode(config: Config, gpus: list[GpuInfo]) -> str:
-    """The backend the farm's default gpu.mode aims for, judged from the cards alone (the
-    NVIDIA runtime is assumed built). For capacity planning; starts nothing, reads no files."""
-    mode = config.gpu.mode
-    if mode == "software" or mode in VENDOR_MODES:
-        return mode
-    card, _, _ = _serve(mode, gpus, config.gpu.prefer, {"ready": True, "icd": True}, lambda c: c[0], lambda g: "")
-    return card.vendor if card else "software"
+def default_choice(config: Config, paths: Paths, *, gpus: list[GpuInfo] | None = None,
+                   runtime: dict | None = None) -> tuple[GpuChoice | None, str]:
+    """How an Android with the farm's default settings (gpu.mode, gpu.prefer,
+    gpu.render_node) would draw if it were started now: (choice, "") or (None, why it
+    could not start). This is choose() itself, in planning mode, so the capacity estimate
+    and a real start cannot disagree. Starts nothing."""
+    try:
+        return choose(resolve(InstanceSpec(id=1), config), config, paths, gpus=gpus, runtime=runtime,
+                      ensure_relay=None), ""
+    except ValueError as e:
+        return None, str(e)
 
 
 def options(config: Config, paths: Paths, *, gpus: list[GpuInfo] | None = None,
@@ -453,7 +458,7 @@ def options(config: Config, paths: Paths, *, gpus: list[GpuInfo] | None = None,
         if card is not None:
             reason = ""
         elif skipped:
-            reason = "; ".join(s.removeprefix("NVIDIA skipped: ") for s in skipped)
+            reason = "; ".join(s.removeprefix(NVIDIA_SKIPPED) for s in skipped)
         else:
             reason = _what_is_missing(value, cards, node)
         label = title + (f": {', '.join(dict.fromkeys(named))}" if named and not node else "")

@@ -37,7 +37,7 @@ ANDROID_RESTART = ("android.", "resources.", "gpu.", "network.", "device.", "med
                    "performance.disable_animations")
 # Settings the listening socket and the log files are opened with: daemon restart.
 DAEMON_RESTART = ("server.host", "server.port", "server.tls_cert", "server.tls_key", "server.allowed_origins",
-                  "logging.")
+                  "server.trusted_proxies", "logging.")
 
 DOCTOR_TTL = 60.0      # seconds a doctor run is reused; it runs a few dozen probes
 
@@ -146,8 +146,7 @@ class Farm:
         return self.instances.images       # the manager's own, so builds and pulls share its locks
 
     def _make_backups(self):
-        from .core.backup import Backups
-        return Backups(self.instances)
+        return self.instances.backups      # the manager's own: one schedule state, one set of locks
 
     def _make_library(self):
         from .control import AppLibrary
@@ -197,12 +196,26 @@ class Farm:
         from .automation import Automation
         return Automation(self.config, self.paths, self.instances, self.tasks)
 
+    def _make_approvals(self):
+        from .ai.approvals import Approvals
+        return Approvals(self.paths.logs / "approvals.jsonl",
+                         timeout_seconds=self.config.ai.approval_timeout_seconds)
+
+    def _make_assistant(self):
+        from .ai.assistant import Assistant
+        return Assistant(self.config, self.paths, self.tasks)
+
+    def _make_pilot(self):
+        from .ai.pilot import Pilot
+        return Pilot(self.config, self.paths, self.automation, self.tasks)
+
     _FACTORIES: dict[str, Callable[[Farm], Any]] = {
         "docker": _make_docker, "store": _make_store, "tasks": _make_tasks, "instances": _make_instances,
         "images": _make_images, "backups": _make_backups, "library": _make_library, "apps": _make_apps,
         "files": _make_files, "device": _make_device, "shell": _make_shell, "screen": _make_screen,
         "input": _make_input, "windows": _make_windows, "h264": _make_h264, "camera": _make_camera,
-        "listener": _make_listener, "automation": _make_automation,
+        "listener": _make_listener, "automation": _make_automation, "approvals": _make_approvals,
+        "assistant": _make_assistant, "pilot": _make_pilot,
     }
 
     def use(self, name: str, component: Any) -> None:
@@ -250,6 +263,12 @@ class Farm:
     def listener(self): return self._get("listener")
     @property
     def automation(self): return self._get("automation")
+    @property
+    def approvals(self): return self._get("approvals")
+    @property
+    def assistant(self): return self._get("assistant")
+    @property
+    def pilot(self): return self._get("pilot")
 
     def components(self) -> dict[str, dict]:
         """Every component with whether it could be built: {name: {available, reason}}."""
@@ -274,6 +293,14 @@ class Farm:
             save_config(new, self.paths)
             self._apply(new)
         return new
+
+    def change_config(self, patch: dict) -> tuple[Config, dict[str, list[str]]]:
+        """set_config() plus what this change did (config_effects). Both under one lock: of
+        two saves at the same moment each reports its own keys, not the other's as well."""
+        with self._lock:
+            old = self.config
+            new = self.set_config(patch)
+            return new, config_effects(old, new)
 
     def reload_config(self) -> Config:
         """Read config.yaml again (after it was restored or edited outside the daemon)."""

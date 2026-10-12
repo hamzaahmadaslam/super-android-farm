@@ -524,16 +524,28 @@ def test_options_start_nothing(tmp_path, paths, monkeypatch):
     assert by_key(rows)[("nvidia", "")]["available"] is False       # no runtime was built in the temporary home
 
 
-def test_planned_mode_for_capacity(tmp_path):
+def test_default_choice_is_what_a_new_android_would_get(tmp_path, paths):
     gs = detect(tmp_path, {128: INTEL_IGPU, 129: NVIDIA})
     cfg = lambda **g: Config.model_validate({"gpu": g})  # noqa: E731
-    assert gpu.planned_mode(cfg(), gs) == "nvidia"
-    assert gpu.planned_mode(cfg(prefer="igpu"), gs) == "intel"
-    assert gpu.planned_mode(cfg(mode="igpu"), gs) == "intel"
-    assert gpu.planned_mode(cfg(mode="dgpu"), gs) == "nvidia"
-    assert gpu.planned_mode(cfg(mode="dgpu"), gs[:1]) == "software"
-    assert gpu.planned_mode(cfg(mode="amd"), gs) == "amd"            # an explicit vendor is taken at its word
-    assert gpu.planned_mode(cfg(), []) == "software"
+
+    def mode(config, cards=gs, runtime=READY):
+        choice, why = gpu.default_choice(config, paths, gpus=cards, runtime=runtime)
+        return choice.mode if choice else f"none: {why}"
+
+    assert mode(cfg()) == "nvidia" and mode(cfg(), runtime=NOT_BUILT) == "intel"
+    assert mode(cfg(), gs[1:], NOT_BUILT) == "software" and mode(cfg(), []) == "software"
+    assert mode(cfg(prefer="igpu")) == "intel" and mode(cfg(mode="igpu")) == "intel"
+    assert mode(cfg(mode="dgpu")) == "nvidia"
+    assert mode(cfg(render_node=D128)) == "intel"                    # the farm-wide pinned card is honoured
+    assert mode(cfg(mode="dgpu"), gs[:1]).startswith("none: gpu mode 'dgpu' needs a discrete GPU")
+    assert mode(cfg(mode="nvidia"), runtime=NOT_BUILT).startswith("none: gpu mode 'nvidia' is not available")
+    assert mode(cfg(mode="amd")).startswith("none: gpu mode 'amd' needs an AMD GPU")
+
+
+def test_default_choice_starts_nothing(tmp_path, paths, monkeypatch):
+    monkeypatch.setattr(venus, "ensure_relay", lambda *a, **k: (_ for _ in ()).throw(AssertionError("relay started")))
+    choice, _ = gpu.default_choice(Config(), paths, gpus=detect(tmp_path, {129: NVIDIA}), runtime=READY)
+    assert choice.mode == "nvidia" and choice.kind == "dgpu"
 
 
 def test_summary_lists_modes_available_now(tmp_path, paths):

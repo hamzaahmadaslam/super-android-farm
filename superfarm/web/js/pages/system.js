@@ -2,11 +2,13 @@
 // host checklist with the exact fix for each problem, and the Android images.
 
 import { get, post } from '../api.js';
-import { badge, button, capacityCard, card, kv, pageHead } from '../common.js';
+import { badge, button, capacityCard, emptyState, kv, pageHead, panel, skeleton } from '../common.js';
+import { help } from '../components/help.js';
 import { dataTable } from '../components/table.js';
 import { finished } from '../components/tasks.js';
 import { attempt, ok } from '../components/toast.js';
 import { copyText, h, mb, replace } from '../dom.js';
+import { icon } from '../icons.js';
 
 const ORDER = { fail: 0, warn: 1, skip: 2, ok: 3 };
 
@@ -25,15 +27,20 @@ function limits(capacity) {
 }
 
 export async function render(root, params, scope) {
-  const host = card('This machine');
-  const capacity = card('Capacity estimate');
-  const gpus = card('Graphics');
-  const checks = h('section', { class: 'card', id: 'checks' });
-  const images = card('Android images');
-  root.append(pageHead('System'), h('div', { class: 'stack' }, h('div', { class: 'grid cols-2' }, host, capacity), gpus, checks, images));
+  const head = (title, name, topic, actions) => h('div', { class: 'card-head' }, h('h2', null, icon(name), title, topic && help(topic)), actions);
+  const host = h('section', { class: 'card' }, head('This machine', 'system'), skeleton(4));
+  const capacity = h('section', { class: 'card' }, head('Capacity estimate', 'gauge', 'capacity'), skeleton(4));
+  const gpus = h('section', { class: 'card' }, head('Graphics', 'layers', 'rendering'), skeleton(3));
+  const checks = h('section', { class: 'card', id: 'checks' }, head('Host checks', 'shield'), skeleton(5));
+  const images = panel('Android images', { icon: 'layers' });
+  images.id = 'images';
+  root.append(
+    pageHead('System', 'What this machine is, how many Androids it can run and why, and whether the host is set up for them.',
+      button('Run doctor', () => attempt(() => loadChecks(true), 'Host checks ran again.').then(() => checks.scrollIntoView({ block: 'start' })), '', 'shield')),
+    h('div', { class: 'stack' }, h('div', { class: 'cols-machine' }, h('div', { class: 'stack' }, host, gpus), capacity), checks, images));
 
   const system = await get('/api/system');
-  replace(host, h('h2', null, 'This machine'), kv({
+  replace(host, head('This machine', 'system'), kv({
     'Super Farm': system.version, 'Farm home': system.home,
     System: `${system.host.distro} (${system.host.family})`, Kernel: `${system.host.kernel} ${system.host.arch}`,
     Processor: `${system.host.cpu.model}, ${system.host.cpu.threads} threads`,
@@ -41,12 +48,12 @@ export async function render(root, params, scope) {
   }),
   h('h3', null, 'Parts of the farm'),
   h('ul', null, Object.entries(system.components || {}).filter(([, c]) => !c.available).map(([name, c]) => h('li', null, badge('warn', name), ' not available: ', c.reason))),
-  Object.values(system.components || {}).every((c) => c.available) && h('p', { class: 'muted' }, 'Every part of the farm is available on this machine.'));
+  Object.values(system.components || {}).every((c) => c.available) && h('p', null, badge('ok', 'all available'), ' Every part of the farm is available on this machine.'));
 
   const loadCapacity = async () => {
     const cap = await get('/api/system/capacity');
-    replace(capacity, h('h2', null, 'Capacity estimate'),
-      cap.estimate && cap.estimate.error ? h('div', { class: 'banner fail' }, `The estimate could not be computed: ${cap.estimate.error}`)
+    replace(capacity, head('Capacity estimate', 'gauge', 'capacity'),
+      cap.estimate && cap.estimate.error ? h('div', { class: 'banner fail' }, icon('alert'), h('div', { class: 'grow' }, `The estimate could not be computed: ${cap.estimate.error}`))
         : [capacityCard(cap, { advice: 50 }), limits(cap),
           h('p', { class: 'small muted' }, cap.estimate.assumptions ? `Measured on: ${cap.estimate.assumptions.reference}. ` : '',
             cap.enforced ? 'performance.enforce_capacity is on: a start over the estimate asks for "Run anyway".'
@@ -57,17 +64,19 @@ export async function render(root, params, scope) {
     const data = await get('/api/system/gpus');
     const relays = data.relay.relays || [];
     const runtime = data.relay.runtime || {};
-    replace(gpus, h('h2', null, 'Graphics'),
-      data.gpus.length === 0 ? h('p', { class: 'muted' }, 'No GPU was found. Androids draw on the CPU (software rendering), which costs several times more CPU.')
-        : h('div', { class: 'table-wrap' }, h('table', { 'aria-label': 'Graphics cards' },
-          h('thead', null, h('tr', null, ['Card', 'Kind', 'Driver', 'Device', 'Video memory', 'Usable as'].map((t) => h('th', { scope: 'col' }, t)))),
-          h('tbody', null, data.gpus.map((g) => h('tr', null,
-            h('td', null, g.name), h('td', null, (g.integrated ?? !g.discrete) ? 'integrated' : 'discrete'), h('td', null, g.driver), h('td', null, h('code', null, g.node)),
-            h('td', null, g.vram_mb ? mb(g.vram_mb) : 'shared'),
-            h('td', null, (g.usable_modes || []).join(', ') || g.note || 'not usable')))))),
+    replace(gpus, head('Graphics', 'layers', 'rendering'),
+      data.gpus.length === 0 ? emptyState('layers', 'No GPU was found', 'Androids draw on the CPU (software rendering), which costs several times more CPU.')
+        : h('ul', { class: 'gpu-list', 'aria-label': 'Graphics cards' }, data.gpus.map((g) => h('li', { class: 'gpu-item' },
+          h('strong', null, g.name),
+          h('div', { class: 'row small muted' },
+            h('span', null, (g.integrated ?? !g.discrete) ? 'integrated' : 'discrete'), '·', h('span', null, `driver ${g.driver}`), '·',
+            h('code', null, g.node), '·', h('span', null, g.vram_mb ? `${mb(g.vram_mb)} video memory` : 'shared memory')),
+          h('div', { class: 'row small' }, h('span', { class: 'muted' }, 'usable as'),
+            (g.usable_modes || []).length ? g.usable_modes.map((mode) => h('code', null, mode)) : h('span', { class: 'warn' }, g.note || 'not usable'))))),
       h('h3', null, 'Rendering choices for an Android'),
-      h('ul', null, (data.options || []).map((o) => h('li', null, badge(o.available ? 'ok' : '', o.available ? 'available' : 'unavailable'), ' ',
-        h('strong', null, o.label), o.available ? '' : ` — ${o.reason}`))),
+      h('div', null, (data.options || []).map((o) => h('div', { class: 'alert' }, badge(o.available ? 'ok' : '', o.available ? 'available' : 'unavailable'),
+        h('div', { class: 'body' }, h('strong', null, o.label), ' ', h('code', null, o.node ? `${o.value}@${o.node}` : o.value),
+          o.reason ? h('div', { class: 'chip-reason' }, o.reason) : null)))),
       data.gpus.some((g) => g.vendor === 'nvidia') && [
         h('h3', null, 'NVIDIA relay'),
         h('p', null, badge(runtime.ready ? 'ok' : 'warn', runtime.ready ? 'runtime installed' : 'runtime incomplete'), ' ',
@@ -77,19 +86,30 @@ export async function render(root, params, scope) {
       ]);
   };
 
-  const loadChecks = async (fresh) => {
+  // A declaration, not a const: the page-head button may be pressed before this line runs.
+  async function loadChecks(fresh) {
     const data = await get('/api/system/doctor', fresh ? { fresh: true } : null);
     const sorted = [...data.checks].sort((a, b) => ORDER[a.status] - ORDER[b.status]);
     const counts = data.summary.counts;
-    replace(checks,
-      h('div', { class: 'card-head' }, h('h2', null, 'Host checks'),
-        h('span', { class: 'muted' }, `${counts.ok} ok · ${counts.warn} warnings · ${counts.fail} failed · ${counts.skip} skipped`),
-        button('Run again', () => attempt(() => loadChecks(true)), 'small')),
-      h('div', { class: 'stack' }, sorted.map((check) => h('div', null,
-        badge(check.status), ' ', h('strong', null, check.title), ' ', h('span', { class: 'muted' }, check.detail),
+    const problems = sorted.filter((check) => check.status !== 'ok');
+    const passing = sorted.filter((check) => check.status === 'ok');
+    const wasOpen = Boolean(checks.querySelector('details[open]'));
+    const row = (check) => h('div', { class: 'alert' },
+      badge(check.status),
+      h('div', { class: 'body grow' }, h('strong', null, check.title), ' ', h('span', { class: 'muted' }, check.detail),
         check.fix && check.status !== 'ok' && h('div', { class: 'fix' }, h('pre', null, check.fix),
-          button('Copy', () => copyText(check.fix).then(() => ok('Copied.'), () => {}), 'small'))))));
-  };
+          button('Copy', () => copyText(check.fix).then(() => ok('Command copied.'), () => {}), 'small', 'copy'))));
+    replace(checks,
+      head('Host checks', 'shield', null, [
+        h('span', { class: 'row' }, badge('ok', `${counts.ok} ok`), counts.warn ? badge('warn', `${counts.warn} warnings`) : null,
+          counts.fail ? badge('fail', `${counts.fail} failed`) : null, counts.skip ? badge('skip', `${counts.skip} skipped`) : null),
+        button('Run again', () => attempt(() => loadChecks(true), 'Host checks ran again.'), 'small', 'restart')]),
+      // What needs a look comes first and stays open; what passes folds away.
+      problems.length === 0 && h('p', null, badge('ok', 'all good'), ' Every host check passes.'),
+      h('div', null, problems.map(row)),
+      passing.length > 0 && h('details', { open: wasOpen || problems.length === 0 },
+        h('summary', null, `${passing.length} passing check(s)`), h('div', null, passing.map(row))));
+  }
 
   const imageTable = dataTable({
     label: 'Android images',
@@ -102,7 +122,7 @@ export async function render(root, params, scope) {
         h('span', { class: `badge ${f.available ? 'ok' : ''}`, title: f.unsupported || f.reason || null },
           `${name}: ${f.available ? 'ready' : f.supported ? 'not built' : 'not on this version'}`), ' ']) },
       { title: '', class: 'actions', cell: (i) => [
-        button('Prepare', () => imageTask(i.version, 'ensure'), 'small'), ' ',
+        button('Prepare', () => imageTask(i.version, 'ensure'), i.built ? 'small' : 'small primary'), ' ',
         button('Rebuild', () => imageTask(i.version, 'build'), 'small'),
       ] },
     ],
@@ -116,8 +136,13 @@ export async function render(root, params, scope) {
   images.append(h('p', { class: 'small muted' }, '"Prepare" pulls the base image if needed and builds the farm image; it also happens automatically at the first start of an Android of that version.'), imageTable.el);
 
   const guarded = (fn, target, title) => fn().catch((error) => replace(target, h('h2', null, title), h('p', { class: 'fail' }, error.message)));
+  // "#/system/checks/run" is the command palette's "Run doctor": read the host again.
+  const rerun = params[0] === 'checks' && params[1] === 'run';
+  if (rerun) history.replaceState(null, '', '#/system/checks');
   await Promise.all([guarded(loadCapacity, capacity, 'Capacity estimate'), guarded(loadGpus, gpus, 'Graphics'),
-    guarded(() => loadChecks(false), checks, 'Host checks'), guarded(loadImages, images, 'Android images')]);
-  if (params[0] === 'checks') checks.scrollIntoView();
+    guarded(() => loadChecks(rerun), checks, 'Host checks'), guarded(loadImages, images, 'Android images')]);
+  if (rerun) ok('Host checks ran again.');
+  if (params[0] === 'checks') checks.scrollIntoView({ block: 'start' });
+  if (params[0] === 'images') images.scrollIntoView({ block: 'start' });
   scope.every(10000, loadCapacity).catch(() => {});
 }

@@ -2,7 +2,7 @@
 import re
 
 import pytest
-from net_fakes import OVPN, PREFIX, WG, FakeDocker, env_of, make_config, make_resolved, option_values
+from net_fakes import OVPN, PREFIX, WG, FakeDocker, at_once, env_of, make_config, make_resolved, option_values
 
 from superfarm.core.models import NET_IMAGE, InstanceSpec
 from superfarm.core.store import Store
@@ -250,6 +250,46 @@ def test_gateway_member_joins_both_networks_and_brings_the_gateway_up(farm):
     assert "--device" not in args and "--mount" not in args, "a member holds no VPN material at all"
     assert docker.containers[f"{PREFIX}-gw-eu"]["running"] and f"{PREFIX}-gwnet-eu" in docker.networks
     assert SECRET not in " ".join(args)
+
+
+# ------------------------------------------------------------------ started twice at once
+
+def test_two_starts_of_one_android_at_once_agree_and_build_the_image_once(farm):
+    """Start pressed twice. Both calls must describe the same container: the instance manager
+    hashes these arguments, and Docker lets only one container have the name."""
+    paths, store, docker = farm
+    config = vpn_farm(farm, selection="unique")
+    docker.images.clear()                                # first start ever: the image is not built yet
+    docker.delay = 0.002
+    store.save(InstanceSpec(id=1))
+    r = make_resolved(config, 1)
+    results = at_once(*[lambda: sidecar_run_args(r, config, paths, store, docker)] * 4)
+    assert all(isinstance(args, list) for args in results), results
+    assert all(args == results[0] for args in results)
+    assert len(docker.called("build")) == 1
+    profile = env_of(results[0])["SF_PROFILE_NAME"]
+    assert store.state_get(1, "vpn_profile") == profile
+    assert (paths.instance(1) / "net" / "profile.ovpn").read_text() == vpn.load_profile(paths, profile).text
+    assert sorted(f.name for f in (paths.instance(1) / "net").iterdir()) == ["profile.ovpn"], "no half-written copies left"
+    assert not docker.called("run", "-d") and not docker.networks, "preparing a start creates no container"
+
+
+def test_androids_of_one_gateway_starting_at_once_bring_it_up_once(farm):
+    paths, store, docker = farm
+    vpn.import_profile(paths, "exit.ovpn", OVPN.encode())
+    vpn.set_credentials(paths, "default", "user", SECRET)
+    config = make_config(mode="gateway", gateway="eu", gateways={"eu": {"profile": "exit.ovpn"}})
+    docker.delay = 0.002
+    for i in (1, 2):
+        store.save(InstanceSpec(id=i))
+    first, again, other = at_once(*[lambda i=i: sidecar_run_args(make_resolved(config, i), config, paths, store, docker)
+                                    for i in (1, 1, 2)])
+    assert first == again and isinstance(other, list)
+    for args in (first, other):
+        assert option_values(args, "--network") == [f"{PREFIX}-bridge", f"{PREFIX}-gwnet-eu"]
+        assert env_of(args)["SF_GATEWAY_IP"] == "10.213.0.2"
+    assert len(docker.called("run", "-d")) == 1 and list(docker.containers) == [f"{PREFIX}-gw-eu"]
+    assert sorted(docker.networks) == [f"{PREFIX}-bridge", f"{PREFIX}-gwnet-eu"]
 
 
 # ------------------------------------------------------------------ small helpers

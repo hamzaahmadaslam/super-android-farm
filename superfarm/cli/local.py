@@ -117,7 +117,7 @@ def _gpus() -> list:
 
 def host_capacity(ctx: Ctx) -> int:
     from ..host import capacity
-    estimate = capacity.estimate(ctx.config, _gpus(), workload=ctx.args.workload)
+    estimate = capacity.estimate(ctx.config, _gpus(), workload=ctx.args.workload, paths=ctx.paths)
     if ctx.out.json_mode:
         ctx.out.json(estimate)
         return EXIT_OK
@@ -331,12 +331,13 @@ def token(ctx: Ctx) -> int:
     try:
         if ctx.args.rotate:
             value = auth.rotate_token(ctx.paths)
-            ctx.out.note("New token written. The old one stops working at once; browsers stay signed in "
-                         "until their session ends.")
+            ctx.out.note("New token written. The old one stops working at once; a running daemon signs every "
+                         "browser out and closes open live views within a few seconds.")
         else:
             value = auth.ensure_token(ctx.paths)
     except OSError as e:
         raise CliError(f"cannot write {auth.token_path(ctx.paths)}: {e.strerror or e}") from None
+    ctx.out.note("This token is equivalent to root on this machine: treat it like a root password.")
     if ctx.out.json_mode:
         ctx.out.json({"token": value, "path": str(auth.token_path(ctx.paths))})
     else:

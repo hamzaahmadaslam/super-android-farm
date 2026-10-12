@@ -6,7 +6,7 @@ import json
 import stat
 
 import pytest
-from api_fakes import BASE, WS, Api, api
+from api_fakes import BASE, WS, Api, api, closes
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -225,11 +225,10 @@ def test_failed_logins_lock_the_client_out_for_a_while(tmp_path):
         r = client.post("/api/auth/login", json={"token": "guess"})
         assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
         assert 1 <= int(r.headers["retry-after"]) <= 60
-        # Locked out means locked out: the right token is not even compared, so a guesser
-        # learns nothing from the answers it gets in the meantime.
-        assert client.post("/api/auth/login", json={"token": a.token}).status_code == 429
-        assert a.client.get("/api/instances").status_code == 429
-        a.app.state.auth.limiter.reset("testclient")
+        # Only wrong tokens are refused: the right one is compared first and always let in,
+        # or ten wrong ones from an address would lock its real owner out.
+        assert a.client.get("/api/instances").status_code == 200
+        assert client.post("/api/auth/login", json={"token": "guess"}).status_code == 429
         assert client.post("/api/auth/login", json={"token": a.token}).status_code == 200
 
 
@@ -238,7 +237,8 @@ def test_bad_bearer_tokens_count_towards_the_same_limit(tmp_path):
         for _ in range(2):
             assert a.anonymous.get("/api/instances", headers={"Authorization": "Bearer guess"}).status_code == 401
         assert a.anonymous.get("/api/instances", headers={"Authorization": "Bearer guess"}).status_code == 429
-        assert fresh(a).post("/api/auth/login", json={"token": a.token}).status_code == 429
+        assert fresh(a).post("/api/auth/login", json={"token": "guess"}).status_code == 429
+        assert fresh(a).post("/api/auth/login", json={"token": a.token}).status_code == 200
 
 
 def test_a_session_is_not_affected_by_the_lockout(tmp_path):
@@ -404,9 +404,13 @@ def test_websocket_first_message_guesses_are_rate_limited(tmp_path):
                 with pytest.raises(WebSocketDisconnect):
                     ws.receive_text()
         with fresh(a).websocket_connect(WS + "/api/events") as ws:
-            ws.send_text(json.dumps({"auth": a.token}))
-            with pytest.raises(WebSocketDisconnect):       # locked out, right token or not
+            ws.send_text('{"auth": "guess"}')
+            with pytest.raises(WebSocketDisconnect) as closed:
                 ws.receive_text()
+            assert closed.value.reason == "rate_limited"
+        with fresh(a).websocket_connect(WS + "/api/events") as ws:
+            ws.send_text(json.dumps({"auth": a.token}))    # the right token is let in all the same
+            assert json.loads(ws.receive_text()) == {"type": "hello"}
 
 
 def test_websocket_without_authentication_times_out(a, monkeypatch):
@@ -416,3 +420,168 @@ def test_websocket_without_authentication_times_out(a, monkeypatch):
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_text()
         assert closed.value.code == 1008
+
+
+# ------------------------------------------- authentication follows the bound address
+
+def assert_locked(a: Api) -> None:
+    """Nothing is served without credentials, whatever the config says by now."""
+    assert a.farm.config.server.auth_required is False            # the setting itself was saved
+    assert a.app.state.auth.required is True
+    assert a.anonymous.get("/api/instances").status_code == 401
+    assert a.anonymous.post("/api/instances", json={"count": 1}).status_code == 401
+    assert a.anonymous.post("/api/shell", json={"selector": "all", "argv": ["id"], "root": True}).status_code == 401
+    assert a.anonymous.post("/api/auth/login", json={"token": "anything"}).status_code == 401
+    assert a.anonymous.get("/api/auth/me").status_code == 401
+    with fresh(a).websocket_connect(WS + "/api/events") as ws:
+        ws.send_text('{"hello": 1}')
+        assert closes(ws) == 1008
+    me = a.client.get("/api/auth/me").json()
+    assert me["method"] == "token" and me["auth_required"] is True      # the panel is told the truth
+    client, csrf = login(a)
+    assert csrf and client.get("/api/instances").status_code == 200
+
+
+def test_one_save_cannot_leave_a_listener_that_is_not_loopback_open(tmp_path):
+    # server.host only moves at a restart; auth_required applies at once. Saved together
+    # ("back to local-only, no login") the socket is still on the old address.
+    with api(tmp_path, {"server": {"host": "192.0.2.10"}}) as a:
+        assert a.anonymous.get("/api/instances").status_code == 401
+        r = a.client.patch("/api/config", json={"patch": {"server": {"host": "127.0.0.1", "auth_required": False}}})
+        assert r.status_code == 200 and r.json()["changed"] == ["server.auth_required", "server.host"]
+        assert r.json()["restart_daemon"] == ["server.auth_required", "server.host"]
+        assert_locked(a)
+
+
+def test_a_host_given_on_the_command_line_keeps_authentication_on(tmp_path):
+    with api(tmp_path, listen_host="192.0.2.10") as a:           # `sf serve --host`, config still says 127.0.0.1
+        assert a.app.state.auth.listen_host == "192.0.2.10"
+        r = a.client.patch("/api/config", json={"patch": {"server": {"auth_required": False}}})
+        assert r.status_code == 200 and r.json()["restart_daemon"] == ["server.auth_required"]
+        assert_locked(a)
+        # ... and the address it was told to listen on is one it answers to.
+        assert a.client.get("/api/instances", headers={"Host": "192.0.2.10:7700"}).status_code == 200
+        assert a.client.get("/api/instances", headers={"Host": "evil.example"}).status_code == 403
+
+
+def test_a_restored_config_cannot_open_a_listener_that_is_not_loopback(tmp_path):
+    with api(tmp_path, {"server": {"host": "192.0.2.10"}}) as a:
+        a.farm.paths.config.write_text("server:\n  auth_required: false\n")       # what a farm restore may put back
+        a.farm.reload_config()
+        assert_locked(a)
+
+
+def test_on_loopback_turning_auth_off_still_takes_effect_at_once(a):
+    r = a.client.patch("/api/config", json={"patch": {"server": {"auth_required": False}}})
+    assert r.status_code == 200 and r.json()["restart_daemon"] == []
+    assert a.app.state.auth.required is False
+    assert a.anonymous.get("/api/instances").status_code == 200
+    assert a.anonymous.get("/api/auth/me").json() == {"authenticated": True, "method": "none", "auth_required": False}
+
+
+# --------------------------------------------------- rotating the token signs everyone out
+
+def test_rotating_the_token_ends_browser_sessions(a):
+    client, csrf = login(a)
+    assert client.get("/api/instances").status_code == 200
+    new = rotate_token(a.farm.paths)
+    # No bearer request in between: the cookie itself has to notice.
+    assert client.get("/api/instances").status_code == 401
+    assert client.post("/api/instances", json={"count": 1}, headers={"X-SF-CSRF": csrf}).status_code == 401
+    assert a.core.store.ids() == []
+    a.token = new
+    again, _ = login(a)
+    assert again.get("/api/instances").status_code == 200           # a login made with the new token holds
+
+
+@pytest.mark.parametrize("how", ["session", "bearer", "first-message"])
+def test_rotating_the_token_closes_open_sockets(a, monkeypatch, how):
+    from superfarm.api import ws as ws_mod
+    monkeypatch.setattr(ws_mod, "AUTH_RECHECK", 0.05)
+    client = login(a)[0] if how == "session" else a.client if how == "bearer" else fresh(a)
+    with client.websocket_connect(WS + "/api/events") as ws:
+        if how == "first-message":
+            ws.send_text(json.dumps({"auth": a.token}))
+        assert json.loads(ws.receive_text()) == {"type": "hello"}
+        new = rotate_token(a.farm.paths)
+        assert closes(ws) == 1008
+    with fresh(a).websocket_connect(WS + "/api/events", headers={"Authorization": f"Bearer {new}"}) as ws:
+        assert json.loads(ws.receive_text()) == {"type": "hello"}
+        assert closes(ws, 0.5) is None                              # authenticated after the rotation: stays
+
+
+def test_logging_out_closes_that_sessions_sockets_and_no_others(a, monkeypatch):
+    from superfarm.api import ws as ws_mod
+    monkeypatch.setattr(ws_mod, "AUTH_RECHECK", 0.05)
+    leaving, _ = login(a)
+    staying, _ = login(a)
+    with leaving.websocket_connect(WS + "/api/events") as gone, staying.websocket_connect(WS + "/api/events") as kept:
+        assert json.loads(gone.receive_text()) == json.loads(kept.receive_text()) == {"type": "hello"}
+        fresh(a, cookies=dict(leaving.cookies)).post("/api/auth/logout")
+        assert closes(gone) == 1008
+        assert closes(kept, 0.5) is None
+
+
+def test_turning_auth_on_closes_the_sockets_opened_without_it(tmp_path, monkeypatch):
+    from superfarm.api import ws as ws_mod
+    monkeypatch.setattr(ws_mod, "AUTH_RECHECK", 0.05)
+    with api(tmp_path, {"server": {"auth_required": False}}) as a:
+        with a.anonymous.websocket_connect(WS + "/api/events") as ws:
+            assert json.loads(ws.receive_text()) == {"type": "hello"}
+            assert a.anonymous.patch("/api/config", json={"patch": {"server": {"auth_required": True}}}).status_code == 200
+            assert closes(ws) == 1008
+
+
+# ------------------------------------------------ the right token is never locked out
+
+def test_the_right_token_is_accepted_while_wrong_ones_are_locked_out(tmp_path):
+    with api(tmp_path, {"server": {"login_attempts_per_minute": 3}}) as a:
+        for _ in range(3):
+            assert a.anonymous.get("/api/instances", headers={"Authorization": "Bearer guess"}).status_code == 401
+        refused = a.anonymous.get("/api/instances", headers={"Authorization": "Bearer guess"})
+        assert refused.status_code == 429 and 1 <= int(refused.headers["retry-after"]) <= 60
+        assert fresh(a).post("/api/auth/login", json={"token": "guess"}).status_code == 429
+        # Same address, right token: in at once, by header, by login and on a socket.
+        assert a.client.get("/api/instances").status_code == 200
+        assert fresh(a).post("/api/auth/login", json={"token": a.token}).status_code == 200
+        with fresh(a).websocket_connect(WS + "/api/events") as ws:
+            ws.send_text(json.dumps({"auth": a.token}))
+            assert json.loads(ws.receive_text()) == {"type": "hello"}
+        # ... which does not lift the lockout for whoever is guessing (only a login does that).
+        assert a.app.state.auth.limiter.retry_after("testclient", 3) == 0       # the login above reset it
+        for _ in range(3):
+            a.anonymous.get("/api/instances", headers={"Authorization": "Bearer guess"})
+        assert a.client.get("/api/instances").status_code == 200
+        assert a.anonymous.get("/api/instances", headers={"Authorization": "Bearer guess"}).status_code == 429
+
+
+def test_wrong_tokens_on_read_requests_leave_a_bounded_trace_in_the_daemon_log(tmp_path, caplog):
+    with api(tmp_path, {"server": {"login_attempts_per_minute": 3}}) as a:
+        with caplog.at_level("WARNING", logger="superfarm.api"):
+            for _ in range(40):
+                a.anonymous.get("/api/instances", headers={"Authorization": "Bearer guess-on-a-read"})
+        lines = [r.getMessage() for r in caplog.records if "token" in r.getMessage()]
+        assert 1 <= len(lines) <= 3                                 # one per counted failure, none per refusal
+        assert all("testclient" in line for line in lines)          # who, whatever the method
+        assert "refused" in lines[-1]                               # the last one says the address is now locked out
+        assert "guess-on-a-read" not in caplog.text and a.token not in caplog.text
+        assert a.audit_lines() == []                                # reads stay out of the audit log
+        # Many addresses cannot fill the log either: there is one budget for all of them.
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="superfarm.api"):
+            for n in range(500):
+                with pytest.raises(auth_mod.ApiError):
+                    a.app.state.auth.check_token(f"2001:db8::{n:x}", "guess")
+        lines = [r.getMessage() for r in caplog.records if "token" in r.getMessage()]
+        assert len(lines) == auth_mod.WRONG_TOKEN_LOG_LINES - 3 and "not logged for a minute" in lines[-1]
+
+
+# ------------------------------------------------------------ frames nobody should send
+
+def test_a_binary_first_frame_is_closed_cleanly(a, caplog):
+    with caplog.at_level("WARNING"):
+        with fresh(a).websocket_connect(WS + "/api/events") as ws:
+            ws.send_bytes(b"\x00")
+            assert closes(ws) == 1008
+    assert [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")] == []
+    assert "Traceback" not in caplog.text

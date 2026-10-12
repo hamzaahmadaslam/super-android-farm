@@ -5,11 +5,13 @@
     400 bad_request      a value the caller sent is wrong (ValueError and friends)
     401 unauthorized     no or wrong credentials          403 forbidden / csrf
     404 not_found        no such Android, app, profile, task, file (KeyError)
-    409 conflict         the farm's current state forbids it. `code` says which: busy,
+    409 conflict         the farm's current state forbids it. `code` says which: busy (when
+                         a task holds the Android, `detail` is {"task": id, "ids": [...]}),
                          over_capacity (with `capacity`), needs_force, refused,
                          device_unavailable, screen_offline, ...
     413 too_large        upload over server.max_upload_mb
     422 validation_error the request body does not match the route's schema
+        idempotency_key_reused   the Idempotency-Key was first sent with a different request
     429 rate_limited     too many failed logins
     500 internal         a bug; the daemon log has the traceback, the response does not
     502 command_failed   Docker, ADB or a device did not do what was asked
@@ -86,6 +88,7 @@ def install(app: FastAPI) -> None:
     from ..core.adb import AdbError
     from ..core.backup import BackupError
     from ..core.images import ImageError
+    from ..core.tasks import TaskBusy
     from ..farm import Unavailable
     from ..stream import H264Error, NoDesktopError, ScreenError, ViewerLimit
     from ..util.proc import CommandError
@@ -126,6 +129,11 @@ def install(app: FastAPI) -> None:
         body["error"]["capacity"] = getattr(exc, "capacity", None)
         return JSONResponse(jsonable_encoder(body), status_code=409)
 
+    @app.exception_handler(TaskBusy)
+    async def _busy(_request: Request, exc: TaskBusy) -> JSONResponse:
+        # A second request for an Android a task is still working on (a double click).
+        return error_response(409, "busy", _text(exc), {"task": exc.task.id, "ids": exc.ids})
+
     @app.exception_handler(ScreenError)
     async def _screen(_request: Request, exc: ScreenError) -> JSONResponse:
         # offline / booting: the Android is not showing anything yet. error: the capture failed.
@@ -152,6 +160,7 @@ def install(app: FastAPI) -> None:
         (NoDesktopError, 503, "unavailable"),
         (KeyError, 404, "not_found"),
         (FileNotFoundError, 404, "not_found"),
+        (FileExistsError, 409, "conflict"),          # a second create with a name that is taken
         (IsADirectoryError, 400, "bad_request"),
         (NotADirectoryError, 400, "bad_request"),
         (TimeoutError, 504, "timeout"),

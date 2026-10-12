@@ -34,6 +34,9 @@ class Restore(Archive):
     id: int | None = Field(None, description="Restore over this Android (it must be stopped; needs force). Leave out to restore as a new Android.")
     force: bool = False
     keep_network: bool = Field(False, description="Restoring as new next to the original: keep the copy's network on. Off by default so one identity is never online twice.")
+    trust: bool = Field(False, description="Farm backup made by another farm: also take custom images, boot arguments, properties, adopted volumes, state and schedules from it. Off by default because those can start a privileged container of the archive's choosing.")
+    restore_config: bool = Field(False, description="Farm backup: also replace this farm's config.yaml with the archived one.")
+    restore_secrets: bool = Field(False, description="Farm backup: also restore VPN profiles, credentials and tokens from the archive.")
 
 
 class FarmBackup(Body):
@@ -59,7 +62,8 @@ def backups(request: Request) -> dict:
 
 @router.post("/api/backups")
 def backup_create(body: SelectorBody, request: Request):
-    return accepted(request, farm_of(request).backups.create_many(body.selector), selector=body.selector)
+    # exclusive: refused with 409 `busy` while another task still works on one of these Androids.
+    return accepted(request, farm_of(request).backups.create_many(body.selector, exclusive=True), selector=body.selector)
 
 
 @router.post("/api/backups/farm", status_code=201)
@@ -95,7 +99,9 @@ def backup_restore(body: Restore, request: Request):
             raise ValueError("a farm backup restores settings, not one Android: leave `id` out")
 
         def farm_work(_task) -> dict:
-            result = farm.backups.restore_farm(name, force=body.force)
+            result = farm.backups.restore_farm(name, force=body.force, trust=body.trust,
+                                                      restore_config=body.restore_config,
+                                                      restore_secrets=body.restore_secrets)
             farm.reload_config()        # config.yaml may be among what was restored
             return result
 
@@ -103,12 +109,19 @@ def backup_restore(body: Restore, request: Request):
     target = instance_id(farm, body.id) if body.id is not None else None
 
     def work(task) -> dict:
+        # Where the data being replaced is copied to first (backup.auto_before_risky). The
+        # farm keeps the latest one in the Android's state; only a new value is this restore's.
+        earlier = farm.store.state_get(target, "safety_backup") if target is not None else None
         restored = farm.backups.restore(name, target, task=task, force=body.force, keep_network=body.keep_network)
+        safety = farm.store.state_get(restored, "safety_backup") if target is not None else None
         task.set_result(restored, True, f"restored from {name}")
-        return {"id": restored, "archive": name, "new": target is None}
+        return {"id": restored, "archive": name, "new": target is None,
+                "safety_backup": str(safety) if safety and safety != earlier else ""}
 
     title = f"restore {name} " + (f"over Android {target}" if target is not None else "as a new Android")
-    return accepted(request, farm.tasks.submit("backup.restore", title, work, targets=[target] if target is not None else []))
+    # exclusive: of two restores over one Android (a double click) the second is refused with 409 `busy`.
+    return accepted(request, farm.tasks.submit("backup.restore", title, work, exclusive=True,
+                                               targets=[target] if target is not None else []))
 
 
 @router.delete("/api/backups")

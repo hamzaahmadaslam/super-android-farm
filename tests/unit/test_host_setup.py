@@ -377,9 +377,23 @@ def test_one_failing_step_does_not_stop_the_others(tmp_path, paths):
         steps=[s for s in setup.plan(Config(), paths, root=root, which=lambda n: None, distro=UBUNTU, has_nvidia=False,
                                      user=ME, group=RUN_GROUP) if s["id"] != "groups"])}
     assert steps["packages"]["status"] == "failed" and "failed on purpose" in steps["packages"]["detail"]
-    assert steps["modules"]["status"] == "ok"          # an optional module that will not load is tolerated
+    assert steps["modules"]["status"] == "ok"          # an optional module that will not load is tolerated ...
+    assert "optional step did not succeed: modprobe ip_tables (exit 1: modprobe: failed on purpose)" in steps["modules"]["detail"]   # ... and said
     assert steps["sysctl"]["status"] == "ok" and steps["systemd"]["status"] == "ok"
     assert ["systemctl", "daemon-reload"] in rec.calls
+
+
+def test_an_optional_package_that_does_not_install_is_reported_with_its_hint(tmp_path, paths):
+    # Debian 12 has no scrcpy package: the step stays ok, says what failed and where to get it instead.
+    root = fake_root(tmp_path)
+    rec = Recorder(fail={"apt-get install -y --no-install-recommends scrcpy"})
+    plan_steps = setup.plan(Config(), paths, root=root, which=lambda n: None, distro=UBUNTU, has_nvidia=False, user=ME,
+                            group=RUN_GROUP)
+    step = setup.apply(Config(), paths, root=root, runner=rec, user=ME, steps=plan_steps, only=["packages"])[0]
+    assert step["status"] == "ok"
+    assert "optional step did not succeed: apt-get install -y --no-install-recommends scrcpy (exit 1" in step["detail"]
+    assert "upstream static build" in step["detail"]
+    assert ["apt-get", "install", "-y", "--no-install-recommends", "pigz"] in rec.calls      # the others still ran
 
 
 def test_zram_tool_without_a_device_name_fails_that_step_cleanly(tmp_path, paths):

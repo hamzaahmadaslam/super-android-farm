@@ -3,11 +3,16 @@
 Authentication never uses the URL (a token in a query string ends up in logs, history and
 referrers). A socket is accepted when the handshake carries the session cookie or a bearer
 header; otherwise the first message must be `{"auth": "<token>"}` within a few seconds.
+A socket lives as long as what let it in: every few seconds (AUTH_RECHECK) it asks whether
+its token or session still stands and is closed with 1008 when it does not (the token was
+replaced, the session logged out or expired).
 
 /api/events sends at most a few messages per second:
 
     {"type": "hello"}                                   once, after authentication
     {"type": "update", "tasks": [...], "instances": [...], "removed": [ids]}
+                                                        plus "approvals": [...] when an AI approval
+                                                        request was created or decided (GET /api/approvals)
     {"type": "resync"}                                  this client fell behind: fetch state again
 
 It is a convenience: everything it reports can also be read with GET /api/tasks and
@@ -25,7 +30,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from starlette.concurrency import run_in_threadpool
 
-from .auth import origin_allowed
+from .auth import Identity, origin_allowed
 from .common import instance_id
 from .errors import ApiError
 
@@ -33,44 +38,56 @@ log = logging.getLogger("superfarm.api")
 router = APIRouter()
 
 AUTH_TIMEOUT = 10.0            # seconds an unauthenticated socket may stay open
+AUTH_RECHECK = 5.0             # seconds between checks that an open socket's credential still stands
 TASK_INTERVAL = 0.5            # tasks live in memory: cheap to compare often
 INSTANCE_EVERY = 4             # instances cost one `docker ps`: every 4th round (2 s)
 QUEUE = 32
 POLICY_VIOLATION = 1008
 
 
-async def authenticate(ws: WebSocket) -> bool:
-    """Accept the socket and establish who is on it. False when it was closed instead."""
+async def authenticate(ws: WebSocket) -> Identity | None:
+    """Accept the socket and establish who is on it. None when it was closed instead."""
     auth = ws.app.state.auth
     if "token" in ws.query_params or "auth" in ws.query_params:
         await ws.close(code=POLICY_VIOLATION, reason="credentials are not accepted in the URL")
-        return False
+        return None
     if not origin_allowed(ws, auth.config):
         await ws.close(code=POLICY_VIOLATION, reason="cross-origin WebSocket refused")
-        return False
+        return None
     try:
-        auth.identify(ws)
+        identity = auth.identify(ws)
         await ws.accept()
-        return True
+        return identity
     except ApiError as e:
         if e.status != 401 or ws.headers.get("authorization"):
             await ws.close(code=POLICY_VIOLATION, reason=e.code)      # wrong bearer, or locked out
-            return False
+            return None
     await ws.accept()
     try:
         first = await asyncio.wait_for(ws.receive_text(), AUTH_TIMEOUT)
         token = json.loads(first).get("auth") if first.lstrip().startswith("{") else None
         if not isinstance(token, str) or not token:
             raise ApiError(401, "unauthorized", "expected {\"auth\": \"<token>\"} as the first message")
-        auth.check_token(ws.client.host if ws.client else "unknown", token)
-        return True
+        client = ws.client.host if ws.client else "unknown"
+        auth.check_token(client, token)
+        return Identity("token", client, epoch=auth.epoch)
     except ApiError as e:
         await ws.close(code=POLICY_VIOLATION, reason=e.code)
-    except (asyncio.TimeoutError, ValueError, AttributeError):
+    except (asyncio.TimeoutError, ValueError, AttributeError, KeyError, TypeError):
+        # KeyError: the first frame was binary (receive_text has no "text" to return).
         await ws.close(code=POLICY_VIOLATION, reason="unauthorized")
     except WebSocketDisconnect:
         pass
-    return False
+    return None
+
+
+async def _signed_out(ws: WebSocket, identity: Identity) -> bool:
+    """True, with the socket closed, when what let this socket in no longer stands."""
+    if ws.app.state.auth.still_valid(identity):
+        return False
+    with contextlib.suppress(RuntimeError, OSError, WebSocketDisconnect):
+        await ws.close(code=POLICY_VIOLATION, reason="signed out")
+    return True
 
 
 # ------------------------------------------------------------------------------- events
@@ -98,6 +115,7 @@ class EventHub:
         self._starting = asyncio.Lock()
         self._task_marks: dict[str, tuple] = {}
         self._instance_marks: dict[int, str] = {}
+        self._approval_marks: dict[str, str] = {}
 
     async def subscribe(self) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(QUEUE)
@@ -155,6 +173,16 @@ class EventHub:
             raise
         except Exception as e:  # noqa: BLE001 - Docker being away must not end the feed
             log.debug("events: state could not be read: %s", e)
+        try:
+            # In memory, no I/O. The key is only present when something changed.
+            approvals = {a.id: a.to_dict() for a in self.farm.approvals.list(limit=100)}
+            states = {i: a["state"] for i, a in approvals.items()}
+            changed = [approvals[i] for i, state in states.items() if self._approval_marks.get(i) != state]
+            self._approval_marks = states
+            if changed:
+                message["approvals"] = changed
+        except Exception as e:  # noqa: BLE001 - the approvals queue being unavailable must not end the feed
+            log.debug("events: approvals could not be read: %s", e)
         return message
 
     async def _watch(self) -> None:
@@ -163,7 +191,7 @@ class EventHub:
             await asyncio.sleep(TASK_INTERVAL)
             rounds += 1
             message = await self._poll(instances=rounds % INSTANCE_EVERY == 0)
-            if message["tasks"] or message["instances"] or message["removed"]:
+            if message["tasks"] or message["instances"] or message["removed"] or message.get("approvals"):
                 self._publish(message)
 
 
@@ -180,31 +208,38 @@ async def _until_closed(ws: WebSocket) -> None:
 
 @router.websocket("/api/events")
 async def events(ws: WebSocket) -> None:
-    if not await authenticate(ws):
+    identity = await authenticate(ws)
+    if identity is None:
         return
     hub: EventHub = ws.app.state.events
     queue = await hub.subscribe()
     closed = asyncio.create_task(_until_closed(ws))
+    waiting: asyncio.Task | None = None
     try:
         await ws.send_text('{"type":"hello"}')
         while True:
-            waiting = asyncio.create_task(queue.get())
-            done, _ = await asyncio.wait({waiting, closed}, return_when=asyncio.FIRST_COMPLETED)
-            if closed in done:
-                waiting.cancel()
+            waiting = waiting or asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait({waiting, closed}, timeout=AUTH_RECHECK, return_when=asyncio.FIRST_COMPLETED)
+            if closed in done or await _signed_out(ws, identity):
                 return
-            await ws.send_text(waiting.result())
+            if waiting in done:
+                await ws.send_text(waiting.result())
+                waiting = None
     except (WebSocketDisconnect, RuntimeError, OSError):
         pass
     finally:
         hub.unsubscribe(queue)
         closed.cancel()
+        if waiting is not None:
+            waiting.cancel()
 
 
 # -------------------------------------------------------------------------------- h264
 
 async def _control(session, message: dict) -> None:
     """One control message from the browser. Coordinates are 0..1 of the video."""
+    if not isinstance(message, dict):
+        raise ValueError("a control message is a JSON object")
     control = session.control
     kind = message.get("type")
     if kind == "touch":
@@ -240,7 +275,8 @@ async def _fail(ws: WebSocket, code: str, message: str) -> None:
 async def h264(ws: WebSocket, id: str) -> None:
     """Server -> client: one JSON `info` message, then binary frames (see stream.h264 for the
     layout). Client -> server: JSON control messages (touch, tap, key, text, scroll, back, reset)."""
-    if not await authenticate(ws):
+    identity = await authenticate(ws)
+    if identity is None:
         return
     farm = ws.app.state.farm
     try:
@@ -277,7 +313,11 @@ async def h264(ws: WebSocket, id: str) -> None:
         sender = asyncio.create_task(pump())
         receiver = asyncio.create_task(ws.receive())
         while True:
-            done, _ = await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait({sender, receiver}, timeout=AUTH_RECHECK, return_when=asyncio.FIRST_COMPLETED)
+            if await _signed_out(ws, identity):
+                return
+            if not done:
+                continue
             if sender in done:
                 receiver.cancel()
                 error = sender.exception() if not sender.cancelled() else None

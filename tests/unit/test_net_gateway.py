@@ -1,6 +1,8 @@
 """Shared VPN gateways: address planning (pure) and the Docker choreography (scripted CLI)."""
+import contextlib
+
 import pytest
-from net_fakes import OVPN, PREFIX, FakeDocker, env_of, make_config, option_values
+from net_fakes import OVPN, PREFIX, FakeDocker, at_once, env_of, make_config, option_values
 
 from superfarm.net import gateway, sidecar, vpn
 
@@ -152,6 +154,43 @@ def test_ensure_refuses_old_docker_and_foreign_objects(farm):
     assert not docker.called("run", "-d")
 
 
+def assert_one_gateway(docker, results):
+    assert sorted(str(r.get("action") if isinstance(r, dict) else r) for r in results) == ["created"] + ["unchanged"] * (len(results) - 1)
+    assert len({(r["subnet"], r["gateway_ip"], r["uplink_gw"]) for r in results}) == 1
+    assert len(docker.called("run", "-d")) == 1 and len(docker.called("network", "create")) == 2
+    assert list(docker.containers) == [f"{PREFIX}-gw-eu"] and set(docker.networks) == {f"{PREFIX}-bridge", f"{PREFIX}-gwnet-eu"}
+
+
+def test_bringing_a_gateway_up_twice_at_once_creates_it_once(farm):
+    """`up` pressed twice, or several Androids of one gateway started together."""
+    config, paths, docker = farm
+    docker.delay = 0.002
+    assert_one_gateway(docker, at_once(*[lambda: gateway.ensure(docker, config, paths, "eu")] * 4))
+
+
+def test_two_farm_processes_bringing_a_gateway_up_create_it_once(farm, monkeypatch):
+    """A second daemon started by mistake on the same farm home shares no memory with the
+    first one; the lock both of them take is a file in that home."""
+    config, paths, docker = farm
+    docker.delay = 0.002
+    monkeypatch.setattr(gateway, "_lock", contextlib.nullcontext())      # every caller its own process
+    assert_one_gateway(docker, at_once(*[lambda: gateway.ensure(docker, config, paths, "eu")] * 4))
+
+
+def test_a_gateway_that_could_not_start_is_not_created_a_second_time(farm):
+    config, paths, docker = farm
+    docker.start_fails = "docker: Error response from daemon: error gathering device information: no such device"
+    with pytest.raises(RuntimeError, match="no such device"):
+        gateway.ensure(docker, config, paths, "eu")
+    with pytest.raises(RuntimeError, match="no such device"):               # still broken: same answer, nothing piles up
+        gateway.ensure(docker, config, paths, "eu")
+    docker.start_fails = ""
+    # the leftover is this farm's own, with the current plan: it is started, not duplicated
+    assert gateway.ensure(docker, config, paths, "eu")["action"] == "started"
+    assert len(docker.called("run", "-d")) == 1 and len(docker.called("network", "create")) == 2
+    assert docker.containers[f"{PREFIX}-gw-eu"]["running"] and list(docker.containers) == [f"{PREFIX}-gw-eu"]
+
+
 def test_member_brings_the_gateway_up_and_says_where_to_join(farm):
     config, paths, docker = farm
     assert gateway.member(docker, config, paths, "eu") == {
@@ -173,6 +212,21 @@ def test_remove_refuses_while_androids_are_attached(farm):
     assert gateway.remove(docker, config, "eu")["removed"] == [f"{PREFIX}-gw-eu", f"{PREFIX}-gwnet-eu", f"{PREFIX}-bridge"]
     assert not docker.containers and not docker.networks
     assert gateway.remove(docker, config, "eu")["removed"] == []       # removing twice is not an error
+
+
+def test_down_pressed_twice_and_up_against_down_leave_nothing_half_done(farm):
+    config, paths, docker = farm
+    everything = ({f"{PREFIX}-gw-eu"}, {f"{PREFIX}-bridge", f"{PREFIX}-gwnet-eu"})
+    gateway.ensure(docker, config, paths, "eu")
+    docker.delay = 0.002
+    first, second = at_once(*[lambda: gateway.remove(docker, config, "eu")] * 2)
+    assert set(first["removed"] + second["removed"]) == everything[0] | everything[1]
+    assert len(first["removed"] + second["removed"]) == 3, "nothing is removed twice"
+    assert not docker.containers and not docker.networks
+    # up and down at the same moment: whichever comes second wins, as a whole
+    up, down = at_once(lambda: gateway.ensure(docker, config, paths, "eu"), lambda: gateway.remove(docker, config, "eu"))
+    assert up["action"] == "created" and isinstance(down, dict), (up, down)
+    assert (set(docker.containers), set(docker.networks)) in ((set(), set()), everything)
 
 
 def test_remove_never_touches_objects_of_another_farm(farm):

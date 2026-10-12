@@ -1,9 +1,12 @@
 """The doctor against a fake machine: every check must find its problem and name the fix."""
 import json
 import os
+import re
 
 import pytest
 
+from superfarm.cli import main as cli_main
+from superfarm.cli import values as cli_values
 from superfarm.config import Config
 from superfarm.host import doctor, setup
 from superfarm.paths import get_paths
@@ -392,6 +395,8 @@ def test_missing_and_old_tools(tmp_path):
     assert run(root, paths, cam, which=lambda n: None)["tools.ffmpeg"].status == "fail"
     old = run(root, paths, runner=make_runner(tools={"scrcpy": "scrcpy 1.25 <x>\n"}))["tools.scrcpy"]
     assert old.status == "warn" and "2.1" in old.detail
+    # The packaged scrcpy is what is too old (Ubuntu 24.04 ships 1.25): installing it again fixes nothing.
+    assert "upstream build" in old.fix and "apt-get" not in old.fix
     assert "1.0.41" in run(root, paths)["tools.adb"].detail
 
 
@@ -437,3 +442,73 @@ def test_session_and_host_setup(tmp_path):
     w(root, "etc/sysctl.d/90-superfarm.conf", "x\n")
     w(root, "etc/systemd/system/superfarm-host.service", "[Unit]\n")
     assert run(root, paths)["host.setup"].status == "ok"
+
+
+# ------------------------------------------------------------------ fix lines name real commands
+
+# A complete `sf ...` command inside a rendered message: it ends at a comment, `&&`, a
+# closing backtick or bracket, or the end of the line.
+SF_COMMAND = re.compile(r"(?<![\w/.-])sf ((?:[^\s`#&;()|]+ ?)+)")
+
+
+def sf_commands(checks):
+    out = []
+    for c in checks:
+        for m in SF_COMMAND.finditer(c.fix + "\n" + c.detail):
+            words = m.group(1).split()
+            words[-1] = words[-1].rstrip(".,:")
+            out.append((c.id, words))
+    return out
+
+
+def broken_machines(tmp_path):
+    """Doctor runs over machines with as many different problems as the checks know."""
+    cfg = Config.model_validate({
+        "network": {"adb_bind": "0.0.0.0", "adb_port_base": 40000}, "server": {"host": "0.0.0.0"},
+        "media": {"camera": {"enabled": True, "slots": 2}}})
+    low = {s.key: 1 for s in setup.SYSCTLS} | {"net.ipv4.ip_forward": 0}
+    headless = {"USER": "farmer", "XDG_RUNTIME_DIR": "/run/user/1000"}
+    exposed = make_runner(ps="sf-net-1 0.0.0.0:5556->5555/tcp\n", networks=30, bridge="172.17.0.0/29")
+
+    # Nothing loaded, auto-loading off, low limits, Secure Boot, an NVIDIA card without its runtime.
+    root, paths = healthy(tmp_path / "a", loaded=[], modprobe="\n", sysctl=low, total_gb=6, secure_boot=True)
+    add_gpu(root, 129, "nvidia", "0x10de", "0000:01:00.0")
+    w(root, "proc/swaps", "Filename Type Size Used Priority\n")
+    w(root, "proc/meminfo", "MemTotal: 6291456 kB\nMemAvailable: 3000000 kB\nSwapTotal: 0 kB\n")
+    yield from run(root, paths, cfg, runner=exposed, env=headless, port_free=False).values()
+
+    # The camera module installed but unsigned; zram in use with the default swappiness.
+    root, paths = healthy(tmp_path / "b", secure_boot=True, on_disk=[*ALL_MODULES, "v4l2loopback"])
+    w(root, "proc/swaps", "Filename Type Size Used Priority\n/dev/zram0 partition 16777212 0 100\n")
+    w(root, "proc/sys/vm/swappiness", "60\n")
+    yield from run(root, paths, cfg, runner=make_runner(docker_error="permission denied")).values()
+
+    # The camera module loaded, its devices not created yet; binder module present but idle.
+    root, paths = healthy(tmp_path / "c", loaded=[m for m in ALL_MODULES if m != "binder_linux"] + ["v4l2loopback"],
+                          filesystems=())
+    yield from run(root, paths, cfg).values()
+
+    # A machine about which nothing can be read and on which nothing is installed.
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    yield from run(bare, get_paths(tmp_path / "bare-home"), cfg, which=lambda n: None, env={}).values()
+
+
+def test_every_command_in_a_fix_line_is_accepted_by_the_real_cli(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "disk_usage", lambda path: type("Usage", (), {"free": 2 * 1024 ** 3}))   # a full disk
+    parser = cli_main.build_parser()
+    seen = set()
+    for check_id, words in sf_commands(broken_machines(tmp_path)):
+        head, _ = cli_main.split_rest(words)
+        try:
+            parser.parse_args(head)
+        except SystemExit:
+            pytest.fail(f"{check_id}: `sf {' '.join(words)}` is not accepted: {capsys.readouterr().err.strip()[-300:]}")
+        if words[:2] == ["config", "set"]:
+            cli_values.locate(Config, words[2])            # raises when the setting does not exist
+        seen.add(" ".join(words[:3] if words[0] == "config" else words[:2]))
+    # The scenarios above must really reach the fix lines; an empty run would prove nothing.
+    assert seen >= {"host apply", "host sign-module", "host capacity", "recreate all", "service install", "serve",
+                    "backup prune", "config set network.adb_bind", "config set network.adb_port_base",
+                    "config set server.host", "config set server.port", "config set performance.zram.enabled",
+                    "config set performance.swappiness"}, sorted(seen)

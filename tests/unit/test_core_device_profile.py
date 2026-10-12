@@ -132,11 +132,30 @@ def test_geo_parsing():
 
 def test_validate_identity_checks_timezone_and_geo():
     dp.validate_identity(DeviceIdentity(timezone="Europe/Berlin", geo="1,2"))
-    dp.validate_identity(DeviceIdentity(timezone="auto", geo="auto"))
     with pytest.raises(ValueError, match="time zone"):
         dp.validate_identity(DeviceIdentity(timezone="Berlin; reboot"))
     with pytest.raises(ValueError):
         dp.validate_identity(DeviceIdentity(geo="north"))
+
+
+@pytest.mark.parametrize("field", ["timezone", "geo"])
+def test_there_is_no_auto_for_timezone_or_location(field):
+    """Nothing in the farm can tell where an Android's traffic leaves the internet, so a
+    value that promises to derive the zone or position from it is refused everywhere."""
+    with pytest.raises(ValueError):
+        dp.validate_identity(DeviceIdentity(**{field: "auto"}))
+    with pytest.raises(ValueError):
+        Config.model_validate({"device": {field: "auto"}})
+    assert "auto" not in Config.model_fields["device"].annotation.model_fields[field].description.lower()
+
+
+def test_farm_wide_timezone_and_location_are_checked_when_the_config_is_loaded():
+    cfg = Config.model_validate({"device": {"timezone": " Europe/Berlin ", "geo": "52.52,13.405"}})
+    assert (cfg.device.timezone, cfg.device.geo) == ("Europe/Berlin", "52.52,13.405")
+    assert Config().device.timezone == "" and Config().device.geo == ""
+    for bad in ({"timezone": "Berlin; reboot"}, {"geo": "north"}, {"geo": "91,0"}):
+        with pytest.raises(ValueError):
+            Config.model_validate({"device": bad})
 
 
 def test_effective_identity_fills_farm_defaults_but_keeps_pinned_values():
@@ -193,14 +212,10 @@ def test_post_boot_location_needs_root_and_uses_it(adb):
             "52.520000,13.405000", "--accuracy", "5"] in calls
 
 
-def test_post_boot_auto_values_need_a_locator(adb):
-    ident = DeviceIdentity(timezone="auto", geo="auto")
-    out = dp.apply_post_boot(adb, resolved(ident), root_exec=lambda argv: "")
-    assert out["applied"] == [] and len(out["warnings"]) == 2
-    out = dp.apply_post_boot(adb, resolved(ident), root_exec=lambda argv: "",
-                             locate=lambda r: {"timezone": "America/Chicago", "lat": 41.8, "lon": -87.6})
-    assert out["applied"] == ["timezone", "location"]
-    assert adb.dev["props"]["persist.sys.timezone"] == "America/Chicago"
+def test_post_boot_refuses_a_zone_that_is_not_a_zone(adb):
+    out = dp.apply_post_boot(adb, resolved(DeviceIdentity(timezone="auto")))
+    assert out["applied"] == [] and "bad time zone" in out["warnings"][0]
+    assert adb.dev["props"]["persist.sys.timezone"] == "GMT" and not any("set-timezone" in str(c) for c in adb.dev["shell"])
 
 
 def test_one_failing_item_does_not_stop_the_others(adb):

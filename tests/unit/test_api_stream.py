@@ -8,7 +8,7 @@ import json
 import time
 
 import pytest
-from api_fakes import WS, api
+from api_fakes import WS, api, closes
 from PIL import Image
 from starlette.websockets import WebSocketDisconnect
 from stream_fakes import FakeAdb, FakeManager, offline
@@ -675,3 +675,38 @@ def test_listen_to_one_device(a):
     assert a.client.delete("/api/listen").json() == {"listening": None}
     assert a.client.post("/api/listen/9").status_code == 404
     assert a.client.post("/api/listen/abc").status_code == 400
+
+
+def test_h264_refuses_a_control_message_that_is_not_an_object(a, caplog):
+    streams = FakeStreams()
+    a.farm.use("h264", streams)
+    with caplog.at_level("WARNING"):
+        with a.client.websocket_connect(WS + "/api/instances/1/h264") as ws:
+            assert json.loads(ws.receive_text())["type"] == "info"
+            assert ws.receive_bytes() and ws.receive_bytes()
+            for junk in ("[1, 2]", '"tap"', "7", "null"):
+                ws.send_text(junk)
+                error = json.loads(ws.receive_text())
+                assert error["code"] == "bad_request" and "JSON object" in error["message"]
+            ws.send_text(json.dumps({"type": "back"}))                  # the socket is still good
+    assert [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")] == []
+    deadline = time.monotonic() + 3
+    while not streams.released and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert streams.session.control.calls == [("back",)] and streams.released == [1]
+
+
+def test_h264_ends_when_the_token_it_was_opened_with_is_replaced(a, monkeypatch):
+    from superfarm.api.auth import rotate_token
+    monkeypatch.setattr(ws_mod, "AUTH_RECHECK", 0.05)
+    streams = FakeStreams()
+    a.farm.use("h264", streams)
+    with a.client.websocket_connect(WS + "/api/instances/1/h264") as ws:
+        assert json.loads(ws.receive_text())["type"] == "info"
+        assert ws.receive_bytes() and ws.receive_bytes()
+        rotate_token(a.farm.paths)
+        assert closes(ws) == 1008
+    deadline = time.monotonic() + 3
+    while not streams.released and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert streams.released == [1] and streams.session.subscription.closed      # the live view was given back

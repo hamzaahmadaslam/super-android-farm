@@ -160,8 +160,10 @@ rules_v6() {
 }
 
 ipv6_absent() {
-    [ ! -e /proc/net/if_inet6 ] && return 0
-    [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" = 1 ] && [ ! -s /proc/net/if_inet6 ]
+    # Only a kernel without IPv6 counts. The disable_ipv6 switch does not: Android can turn it
+    # back on (see init), and "no addresses yet" cannot be told from procfs, whose files
+    # always report size 0.
+    [ ! -e /proc/net/if_inet6 ]
 }
 
 init() {
@@ -179,10 +181,10 @@ init() {
     # write the per-interface disable_ipv6 switch of this namespace and turn it back on.
     if ! rules_v6 | ip6tables-restore 2>"$RUN/ip6tables.err"; then
         if ipv6_absent; then
-            log "IPv6 rules not loaded ($(tr '\n' ' ' <"$RUN/ip6tables.err")); IPv6 is absent in this namespace, continuing"
+            log "IPv6 rules not loaded ($(tr '\n' ' ' <"$RUN/ip6tables.err")); this kernel has no IPv6, continuing"
         else
-            log "ERROR: cannot load IPv6 rules and IPv6 is active: $(tr '\n' ' ' <"$RUN/ip6tables.err")"
-            log "Fix on the host: sudo modprobe -a nf_tables nft_compat   (or start Docker with IPv6 disabled)"
+            log "ERROR: cannot load IPv6 rules and this kernel has IPv6: $(tr '\n' ' ' <"$RUN/ip6tables.err")"
+            log "Fix on the host: sudo modprobe -a nf_tables nft_compat   (or boot the host with ipv6.disable=1)"
             return 1
         fi
     fi

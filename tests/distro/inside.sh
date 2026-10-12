@@ -59,33 +59,49 @@ if [ "${PIPESTATUS[0]}" = 0 ]; then result packages ok "$(grep -c '^  ok ' /tmp/
 else result packages fail "$(grep '^unresolved:' /tmp/packages.log)"; fi
 
 section "command line"
-if [ -x "$VENV/bin/sf" ] && out=$("$VENV/bin/sf" version 2>&1); then result cli ok "$out"
-else
-  # The command-line front end may be incomplete in a development tree; the modules it
-  # wraps must work on their own.
-  result cli skip "sf version did not run: $(printf '%s' "${out:-no sf entry point}" | tail -1 | cut -c1-120)"
-fi
+SF=$VENV/bin/sf
+if out=$("$SF" version 2>&1); then result cli ok "$out"
+else result cli fail "sf version: $(printf '%s' "$out" | tail -1 | cut -c1-160)"; fi
 
 section "doctor"
-if out=$("$PY" - <<'PYEOF' 2>&1
-from superfarm.config import Config
-from superfarm.host import doctor
-from superfarm.paths import get_paths
-checks = doctor.run_checks(Config(), get_paths())
+# A container has no kernel modules of its own, no Docker daemon, no desktop: the doctor is
+# expected to report failures (exit code 1). What must not happen is a crash: output that
+# is not the JSON document, or a check that broke (reported with an `internal.` id).
+"$SF" doctor --json > /tmp/doctor.json 2> /tmp/doctor.err
+code=$?
+if out=$("$PY" - "$code" <<'PYEOF' 2>&1
+import json
+import sys
+code = int(sys.argv[1])
+data = json.load(open("/tmp/doctor.json"))
+checks, counts = data["checks"], data["summary"]["counts"]
 for c in checks:
-    print(f"[{c.status:4}] {c.id:22} {c.detail[:110]}")
-s = doctor.summarize(checks)["counts"]
-crashed = [c.id for c in checks if c.id.startswith("internal.")]
-print(f"SUMMARY {len(checks)} checks: {s['ok']} ok, {s['warn']} warn, {s['fail']} fail, {s['skip']} skip; crashed: {crashed or 'none'}")
-raise SystemExit(1 if crashed else 0)
+    print(f"[{c['status']:4}] {c['id']:22} {c['detail'][:110]}")
+crashed = [c["id"] for c in checks if c["id"].startswith("internal.")]
+unfixable = [c["id"] for c in checks if c["status"] in ("warn", "fail") and not c["fix"]]
+print(f"SUMMARY {len(checks)} checks: {counts['ok']} ok, {counts['warn']} warn, {counts['fail']} fail, "
+      f"{counts['skip']} skip; exit {code}; crashed: {crashed or 'none'}; without a fix line: {unfixable or 'none'}")
+expected = 1 if counts["fail"] else 0
+raise SystemExit(0 if not crashed and not unfixable and code == expected else 1)
 PYEOF
 ); then printf '%s\n' "$out"; result doctor ok "$(printf '%s\n' "$out" | grep '^SUMMARY' | cut -c9-)"
-else printf '%s\n' "$out"; result doctor fail "$(printf '%s\n' "$out" | tail -1 | cut -c1-160)"; fi
+else printf '%s\n' "$out"; cat /tmp/doctor.err; result doctor fail "$(printf '%s\n' "$out" | tail -1 | cut -c1-200)"; fi
+# The same run as a person sees it: the table and the fix lines must render too.
+if "$SF" doctor > /tmp/doctor.txt 2>&1; [ $? -le 1 ] && grep -q ' ok, .* warnings, .* failed, .* skipped' /tmp/doctor.txt; then
+  result doctor-text ok "$(tail -1 /tmp/doctor.txt | cut -c1-120)"
+else result doctor-text fail "$(tail -1 /tmp/doctor.txt | cut -c1-160)"; fi
+sed -n '/^\[fail\]/,$p' /tmp/doctor.txt
 
-section "host setup plan (dry run)"
-if "$PY" -m superfarm.host.setup plan > /tmp/plan.log 2>&1; then result plan ok "$(grep -c '^\[' /tmp/plan.log) steps"
+section "host setup plan (dry run, through the command line)"
+if "$SF" host plan > /tmp/plan.log 2>&1; then result plan ok "$(grep -c '^\[' /tmp/plan.log) steps"
 else result plan fail "$(tail -1 /tmp/plan.log | cut -c1-160)"; fi
 cat /tmp/plan.log
+
+section "host capacity and GPUs (read-only)"
+if "$SF" host capacity > /tmp/capacity.log 2>&1 && "$SF" host gpus >> /tmp/capacity.log 2>&1; then
+  result capacity ok "$(head -1 /tmp/capacity.log | cut -c1-120)"
+else result capacity fail "$(tail -1 /tmp/capacity.log | cut -c1-160)"; fi
+cat /tmp/capacity.log
 
 section "shipped files"
 if out=$("$PY" -c 'from superfarm.resources import resource_path as r
@@ -93,7 +109,44 @@ for parts in (("deploy","docker","net","Dockerfile"),("deploy","systemd","superf
     assert r(*parts).is_file(), parts
 print(r("deploy","docker","net"))' 2>&1); then result resources ok "$out"; else result resources fail "$(printf '%s' "$out" | tail -1)"; fi
 
-section "unit tests (host subset)"
-"$PY" -m pytest -o addopts="" -q -p no:cacheprovider tests/unit/test_host_*.py tests/unit/test_foundation.py tests/unit/test_resources.py 2>&1 | tee /tmp/pytest.log | tail -25
+section "wheel (a plain, non-editable install into a second environment)"
+# The installer above installs the checkout in place. A wheel puts the Dockerfiles, unit
+# templates, scripts and native sources under <prefix>/share/superfarm-resources instead;
+# superfarm.resources must find them there on this distribution's Python layout too.
+WHEEL_VENV=/opt/sf-wheel-venv
+wheel_check() {
+  "$PY" -m pip wheel --quiet --no-deps -w /tmp/wheel "$WORK" || return 1
+  python3 -m venv "$WHEEL_VENV" || return 1
+  "$WHEEL_VENV/bin/python" -m pip install --quiet /tmp/wheel/superfarm-*.whl || return 1
+  # From another folder, so nothing can be picked up from the checkout by accident.
+  ( cd / && "$WHEEL_VENV/bin/python" - <<'PYEOF'
+import os
+import superfarm
+from superfarm.resources import resource_path as r, resource_root
+assert "/work" not in superfarm.__file__, superfarm.__file__
+for parts in (("deploy", "docker", "net", "Dockerfile"), ("deploy", "docker", "android", "Dockerfile"),
+              ("deploy", "systemd", "superfarm.service"), ("deploy", "systemd", "superfarm-host.service"),
+              ("scripts", "camera", "run_loop.py"), ("scripts", "host", "sign-module.sh"),
+              ("native", "venus", "build.sh"), ("native", "v4l2loopback", "build.sh")):
+    assert r(*parts).is_file(), f"missing from the wheel install: {'/'.join(parts)}"
+assert os.access(r("deploy", "docker", "net", "entrypoint.sh"), os.X_OK), "scripts lost their executable bit"
+print(f"WHEELROOT {resource_root()}")
+PYEOF
+  ) || return 1
+  ( cd / && "$WHEEL_VENV/bin/sf" doctor --json > /tmp/wheel-doctor.json; [ $? -le 1 ] ) || return 1
+  "$WHEEL_VENV/bin/python" -c 'import json, sys
+checks = json.load(open("/tmp/wheel-doctor.json"))["checks"]
+crashed = [c["id"] for c in checks if c["id"].startswith("internal.")]
+print(f"doctor from the wheel: {len(checks)} checks, crashed: {crashed or None}")
+sys.exit(1 if crashed or not checks else 0)'
+}
+if wheel_check > /tmp/wheel.log 2>&1; then result wheel ok "$(grep '^WHEELROOT' /tmp/wheel.log | cut -c11-); $(tail -1 /tmp/wheel.log)"
+else result wheel fail "$(tail -1 /tmp/wheel.log | cut -c1-200)"; fi
+cat /tmp/wheel.log
+
+section "unit tests (fast subset: host, foundation, resources, local command line)"
+"$PY" -m pytest -o addopts="" -q -p no:cacheprovider -rs tests/unit/test_host_*.py tests/unit/test_foundation.py \
+  tests/unit/test_resources.py tests/unit/test_cli_parser.py tests/unit/test_cli_local.py tests/unit/test_cli_values.py \
+  2>&1 | tee /tmp/pytest.log | tail -25
 if [ "${PIPESTATUS[0]}" = 0 ]; then result unit-tests ok "$(tail -1 /tmp/pytest.log)"; else result unit-tests fail "$(tail -1 /tmp/pytest.log)"; fi
 exit 0

@@ -1,9 +1,11 @@
 """The daemon as a systemd user service: the unit, its installation, and what it reports."""
+import argparse
 import os
 import re
 
 import pytest
 
+from superfarm.cli.main import build_parser
 from superfarm.host import service
 from superfarm.paths import PACKAGE_DIR, get_paths
 from superfarm.resources import resource_path
@@ -41,6 +43,16 @@ class Systemd:
 
     def verbs(self):
         return [c[2:] for c in self.calls if c[0] == "systemctl"]
+
+
+@pytest.fixture(autouse=True)
+def no_real_commands(monkeypatch):
+    """No test in this file may reach the real systemd: `import-environment` and
+    `daemon-reload` act on the session of whoever runs the suite. A test that forgets to
+    pass its fake fails here instead."""
+    def refuse(argv, **kw):
+        raise AssertionError(f"a test ran a real command: {list(argv)}")
+    monkeypatch.setattr(service.proc, "run", refuse)
 
 
 @pytest.fixture
@@ -194,28 +206,67 @@ def test_module_entry_point_shows_the_unit(paths, capsys):
     assert "[Service]" in out and f"Environment=SUPERFARM_HOME={paths.home.resolve()}" in out
 
 
-# ------------------------------------------------------------------ command names in fix texts
+# ------------------------------------------------------------------ the module's own entry point
 
-# Addendum 5 of the build spec: the commands the `sf` front end has. A fix line that names
-# anything else sends the operator to a command that does not exist.
-CLI = {
-    "doctor": None, "serve": None, "version": None, "token": None, "recreate": None, "ls": None, "start": None,
-    "stop": None, "restart": None, "top": None, "tasks": None, "open": None,
-    "host": {"plan", "apply", "capacity", "gpus", "sign-module"},
-    "config": {"get", "set", "unset", "show", "path", "docs"},
-    "service": {"install", "start", "stop", "status", "logs"},
-    "backup": {"create", "list", "verify", "restore", "prune", "farm"},
-}
+def test_module_entry_point_installs_and_reports(tmp_path, paths, not_root, monkeypatch, capsys):
+    sd = Systemd(linger="yes")
+    monkeypatch.setattr(service.proc, "run", sd)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("XAUTHORITY", raising=False)
+    assert service.main(["install", "--home", str(paths.home), "--no-enable"]) == 0
+    out = capsys.readouterr().out
+    assert (tmp_path / "config/systemd/user/superfarm.service").is_file()
+    assert out.startswith("installed: ") and "published to the user manager: DISPLAY" in out
+    assert ["enable", "superfarm.service"] not in sd.verbs()
+    assert service.main(["status"]) == 0
+    assert "installed: True" in capsys.readouterr().out
+
+
+def test_module_entry_point_fails_with_the_reason(paths, monkeypatch, capsys):
+    monkeypatch.setattr(service.os, "geteuid", lambda: 0)
+    assert service.main(["install", "--home", str(paths.home)]) == 2
+    assert "not as root" in capsys.readouterr().err
+
+
+def test_linger_answers(monkeypatch):
+    assert service.linger("farmer", Systemd(linger="yes")) is True
+    assert service.linger("farmer", Systemd(linger="no")) is False
+    assert service.linger("farmer", Systemd(linger="")) is None          # loginctl answered nothing usable
+    assert service.linger("farmer", Systemd(missing=True)) is None
+
+
+# ------------------------------------------------------------------ command names in host texts
+
+def cli_tree():
+    """The command tree of the real `sf` parser: {name: None | {sub-command: ...}}."""
+    def walk(parser):
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                return {name: walk(sub) for name, sub in action.choices.items()}
+        return None
+    return walk(build_parser())
+
+
+CLI = cli_tree()
 HOST_SOURCES = [*sorted((CHECKOUT / "superfarm" / "host").glob("*.py")), CHECKOUT / "install.sh",
                 *sorted((CHECKOUT / "deploy" / "systemd").glob("*.service")),
                 *sorted((CHECKOUT / "scripts" / "host").glob("*")), CHECKOUT / "native" / "v4l2loopback" / "build.sh"]
 
 
+def test_the_parser_tree_is_read_correctly():
+    assert CLI["doctor"] is None and {"plan", "apply", "capacity", "gpus", "sign-module"} <= set(CLI["host"])
+    assert {"install", "start", "stop", "status", "logs"} <= set(CLI["service"])
+
+
 @pytest.mark.parametrize("source", HOST_SOURCES, ids=lambda p: p.name)
 def test_every_sf_command_named_in_host_texts_exists(source):
+    """A fix line that names a command the front end does not have sends the operator
+    nowhere. Checked against the parser itself, so a renamed command fails here."""
     text = source.read_text()
     assert "sudo sf " not in text.replace("`sudo sf`", "")        # `sf host apply` asks for sudo itself
-    found = re.findall(r"(?<![\w/.-])sf ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", text)
+    found = re.findall(r"(?:(?<![\w/.-])|/bin/)sf ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", text)
     for first, second in found:
         assert first in CLI, f"{source.name}: `sf {first}` is not a command"
         if CLI[first] is not None:

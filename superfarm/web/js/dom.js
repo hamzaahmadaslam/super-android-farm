@@ -5,12 +5,113 @@
 
 const ATTRIBUTE_ONLY = new Set(['role', 'list', 'form', 'for']);   // read-only or unevenly supported as properties
 
+// ------------------------------------------------------- one press, one action
+// Every button and form in the panel is built with h(), so this is the one place that
+// makes a double click, a held Enter or an impatient second press harmless: while the
+// promise a click or submit handler returned is still pending, the control is marked
+// busy (aria-busy, aria-disabled, a spinner) and further presses do nothing. It is
+// released when the work settles, whether it succeeded or failed.
+//
+// aria-disabled rather than the disabled property: the control keeps the focus, so a
+// keyboard user is not thrown to the top of the page, and a dialog that the press
+// opened can hand the focus back to it.
+//
+// A control that is redrawn while its action runs (a row of a polled list) names the
+// action with data-action="start:3"; the new copy is then born busy and released with
+// the old one.
+const busyNow = new WeakSet();
+const actions = new Map();          // data-action -> Set of elements showing it
+
+// Set by main.js: where an error from a handler is shown. Nothing is lost silently.
+export const actionHooks = { error(error) { console.error(error); } };
+
+function parts(el) {
+  return el.tagName === 'FORM' ? [el, ...el.querySelectorAll('button[type="submit"], button:not([type])')] : [el];
+}
+
+function mark(el, on) {
+  for (const part of parts(el)) {
+    if (on) {
+      busyNow.add(part);
+      part.setAttribute('aria-busy', 'true');
+      if (part !== el || el.tagName !== 'FORM') part.setAttribute('aria-disabled', 'true');
+      part.classList.add('is-busy');
+    } else {
+      busyNow.delete(part);
+      part.removeAttribute('aria-busy');
+      part.removeAttribute('aria-disabled');
+      part.classList.remove('is-busy');
+    }
+  }
+}
+
+export const isBusy = (el) => busyNow.has(el) || Boolean(el.dataset && el.dataset.action && actions.has(el.dataset.action));
+
+// Run work() for `el` unless its previous run is still going. Returns what work()
+// returned (a promise is passed on, already guarded), or undefined when it was ignored.
+export function busy(el, work) {
+  if (isBusy(el)) return undefined;
+  const result = work();
+  if (!result || typeof result.then !== 'function') return result;
+  const name = el.dataset ? el.dataset.action : '';
+  if (name) actions.set(name, new Set([el]));
+  mark(el, true);
+  const release = () => {
+    for (const shown of name ? actions.get(name) || [el] : [el]) mark(shown, false);
+    if (name) actions.delete(name);
+  };
+  return result.then((value) => { release(); return value; }, (error) => { release(); actionHooks.error(error); });
+}
+
+function guarded(el, handler) {
+  return (event) => {
+    if (isBusy(el)) {
+      // A form must still not be submitted by the browser itself.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    busy(el, () => handler.call(el, event));
+  };
+}
+
+// The same promise for the same thing asked twice at once ("delete Android 3" from a
+// card and from the bulk bar): `work` runs once, both callers get its result.
+const once = new Map();
+export function single(key, work) {
+  if (once.has(key)) return once.get(key);
+  const promise = Promise.resolve().then(work).finally(() => once.delete(key));
+  once.set(key, promise);
+  return promise;
+}
+
+// When a dialog or the command palette closes, the page underneath is suddenly under the
+// pointer and the opener has the focus again. For a moment, clicks and Enter / Space are
+// swallowed, so the second half of a double click (or a key still held down) does not
+// press whatever happens to be there.
+let shieldUntil = 0;
+let shieldOn = false;
+function swallow(event) {
+  if (performance.now() > shieldUntil) return;
+  if (event.type !== 'click' && event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+export function shield(ms = 320) {
+  shieldUntil = performance.now() + ms;
+  if (shieldOn) return;
+  shieldOn = true;
+  for (const type of ['click', 'keydown', 'keypress', 'keyup']) window.addEventListener(type, swallow, true);
+}
+
+const GUARDED = { button: 'onclick', form: 'onsubmit' };
+
 export function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
   const { value: initial, ...rest } = attrs || {};
   for (const [key, value] of Object.entries(rest)) {
     if (value == null || value === false) continue;
-    if (key.startsWith('on') && typeof value === 'function') el.addEventListener(key.slice(2), value);
+    if (key.startsWith('on') && typeof value === 'function') el.addEventListener(key.slice(2), GUARDED[tag] === key ? guarded(el, value) : value);
     else if (key === 'class') el.className = value;
     else if (key === 'dataset') Object.assign(el.dataset, value);
     else if (key in el && !key.startsWith('aria') && !ATTRIBUTE_ONLY.has(key)) el[key] = value;
@@ -19,6 +120,11 @@ export function h(tag, attrs, ...children) {
   add(el, children);
   // After the children: a <select> can only take a value once its options exist.
   if (initial != null) el.value = initial;
+  // Redrawn while its action is still running: born busy, released with the original.
+  if (el.dataset.action && actions.has(el.dataset.action)) {
+    actions.get(el.dataset.action).add(el);
+    mark(el, true);
+  }
   return el;
 }
 

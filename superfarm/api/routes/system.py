@@ -1,6 +1,7 @@
 """Health, login, system information, settings, images and tasks."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import asdict
@@ -10,10 +11,9 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import Field
 
 from ... import __version__
-from ...config import Config
+from ...config import Config, check_api_patch
 from ...core import device_profile
 from ...core.metrics import farm_metrics
-from ...farm import config_effects
 from ...host import doctor as doctor_mod
 from ...host import gpu as gpu_mod
 from ...host import venus
@@ -21,6 +21,8 @@ from ..audit import note
 from ..auth import CSRF_COOKIE, SESSION_COOKIE, Identity, client_of, require
 from ..common import Body, accepted, bounded, farm_of
 from ..errors import ApiError
+
+log = logging.getLogger("superfarm.api")
 
 public = APIRouter()
 router = APIRouter(dependencies=[Depends(require)])
@@ -44,9 +46,11 @@ class Login(Body):
 def login(body: Login, request: Request, response: Response) -> dict:
     auth = request.app.state.auth
     farm = farm_of(request)
-    if not farm.config.server.auth_required:
+    if not auth.required:
         return {"ok": True, "auth_required": False, "csrf": ""}
     session = auth.login(client_of(request), body.token)
+    # The token was proven: this line belongs to the authenticated history (see audit.py).
+    request.state.identity = Identity("token", client_of(request), epoch=auth.epoch)
     secure = request.url.scheme == "https"
     lifetime = farm.config.server.session_hours * 3600
     response.set_cookie(SESSION_COOKIE, session.id, max_age=lifetime, path="/", httponly=True, samesite="strict",
@@ -69,7 +73,7 @@ def logout(request: Request, response: Response) -> dict:
 @router.get("/api/auth/me")
 def me(request: Request, identity: Identity = Depends(require)) -> dict:
     out: dict[str, Any] = {"authenticated": True, "method": identity.method,
-                           "auth_required": farm_of(request).config.server.auth_required}
+                           "auth_required": request.app.state.auth.required}
     if identity.session is not None:
         out.update(csrf=identity.session.csrf, expires=identity.session.expires)
     return out
@@ -144,10 +148,20 @@ class ConfigPatch(Body):
 @router.patch("/api/config")
 def config_patch(body: ConfigPatch, request: Request) -> dict:
     farm = farm_of(request)
-    old = farm.config
-    new = farm.set_config(body.patch)
-    effects = config_effects(old, new)
+    # Settings that name a program the daemon runs can only be changed in the config file,
+    # so holding the API token is never enough to make the daemon execute something else.
+    try:
+        check_api_patch(farm.config, body.patch)
+    except ValueError as e:
+        raise ApiError(403, "immutable_setting", str(e)) from None
+    new, effects = farm.change_config(body.patch)
     note(request, keys=effects["changed"][:50])
+    if "server.auth_required" in effects["changed"] and not new.server.auth_required and request.app.state.auth.required:
+        # Saved, but this daemon is bound to an address that is not loopback and goes on
+        # asking for the token (see Auth.required). Say so instead of letting it look applied.
+        effects["restart_daemon"] = sorted({*effects["restart_daemon"], "server.auth_required"})
+    if "server.audit_log" in effects["changed"] and not new.server.audit_log:
+        log.warning("the audit log was switched off by %s", client_of(request))
     request.app.state.reconfigure()
     return {"config": new.model_dump(mode="json"), **effects}
 
@@ -205,7 +219,8 @@ def task_cancel(task_id: str, request: Request) -> dict:
     found = farm.tasks.get(task_id)
     if found is None:
         raise KeyError(f"no task {task_id[:40]!r}")
-    if not farm.tasks.cancel(task_id):
+    if not farm.tasks.cancel(task_id) and found.state != "cancelled":
+        # Cancelling what is already cancelled is what a second click does: not an error.
         raise ApiError(409, "conflict", f"task {found.id} has already finished ({found.state})")
     note(request, task=found.id)
     return {"task": found.to_dict()}

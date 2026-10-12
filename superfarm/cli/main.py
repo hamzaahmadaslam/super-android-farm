@@ -18,7 +18,7 @@ from collections.abc import Callable, Sequence
 from .. import __version__
 from . import completion, local
 from .client import ApiError, CliError
-from .commands import automation, backups, device, instances, media, network
+from .commands import ai, assistant, automation, backups, device, instances, media, network
 from .common import EXIT_FAILED, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, Ctx, explain_capacity
 from .render import Output
 
@@ -176,7 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
     b = Builder()
     parser = b.root()
     sub = parser.add_subparsers(title="commands", metavar="<command>")
-    for module in (instances, device, network, media, automation, backups):
+    for module in (instances, device, network, media, automation, backups, assistant, ai):
         module.register(b, sub)
     _local(b, sub)
     return parser

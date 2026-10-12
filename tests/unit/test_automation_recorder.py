@@ -155,10 +155,50 @@ def test_a_literal_is_never_saved_from_a_password_field(setup):
         assert "hunter2" not in saved
 
 
+def test_a_literal_is_refused_when_the_field_cannot_be_checked(setup):
+    # The guard above looks at the focused field. When the screen cannot be read there is
+    # nothing to look at, and saving the text anyway is how a password ends up on disk.
+    dev = device("login")
+    rec = session(setup, dev)
+    dev.fail_reads = 1
+    with pytest.raises(RecordingError, match="the screen could not be read.*try again, or give the value a name"):
+        rec.text("hunter2")
+    assert not dev.acted and rec.recording.steps == []
+    dev.fail_reads = 1
+    step = rec.text("hunter2", name="password")                   # a named value needs no check: it is not saved
+    assert dev.did("text") == [("text", "hunter2")] and step["dynamic"] == "password"
+    saved = (setup[1].recording_dir(rec.recording.id) / "recording.json").read_text()
+    assert "hunter2" not in saved
+
+
+def test_a_password_field_of_any_class_is_recognised(setup):
+    # Toolkits that draw their own fields report password="true" on a class that is not an EditText.
+    drawn = screen(el("android.view.View", id="box", bounds=(20, 100, 460, 160), password=True, focused=True))
+    dev = Ordered({"drawn": drawn}, "drawn")
+    rec = session(setup, dev)
+    with pytest.raises(RecordingError, match="Give the value a name"):
+        rec.text("hunter2")
+    assert not dev.acted and rec.recording.steps == []
+
+
+def test_typing_works_where_the_screen_is_readable_and_nothing_is_focused(setup):
+    rec = session(setup, device("home"))
+    assert rec.text("hello")["text"] == "hello"
+
+
 def test_field_contents_never_enter_a_recording(setup):
     rec = session(setup, device("form"))
     step = rec.tap(240, 50, normalized=False)                     # the field that holds "old"
     assert step["element"]["id"] == "query" and step["element"]["text"] == ""
+    # ... nor through the list of other ways to find the element, which is saved with the step
+    assert step["candidates"] and all("text" not in c for c in step["candidates"] if c.get("id") == "query")
+    saved = (setup[1].recording_dir(rec.recording.id) / "recording.json").read_text()
+    assert '"old"' not in saved
+    expected = rec.assert_visible(240, 50, normalized=False)
+    assert all("text" not in c for c in expected["candidates"])
+    # A label is identity, not content: its text stays.
+    label = session(setup, device("home")).tap(100, 140, normalized=False)
+    assert {"Battery"} <= {c.get("text") for c in label["candidates"]}
 
 
 def test_named_values_must_exist_and_coordinates_must_be_on_screen(setup):

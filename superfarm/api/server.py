@@ -145,10 +145,15 @@ class Daemon:
         tls = tls_files(config)
         self.scheme = "https" if tls else "http"
         setup_logging(config, self.farm.paths.logs, stderr=log_to_stderr)
-        self.app = create_app(self.farm)
+        self.app = create_app(self.farm, listen_host=self.host)      # authentication follows the bound address
+        proxies = list(config.server.trusted_proxies)
         self.server = uvicorn.Server(uvicorn.Config(
             self.app, host=self.host, port=self.port,
             ssl_certfile=tls[0] if tls else None, ssl_keyfile=tls[1] if tls else None,
+            # X-Forwarded-For / -Proto are believed only from server.trusted_proxies. Both are
+            # always passed: left out, uvicorn trusts 127.0.0.1 and $FORWARDED_ALLOW_IPS, and
+            # any local process could choose the address the limiter and the audit log see.
+            proxy_headers=bool(proxies), forwarded_allow_ips=proxies,
             log_config=None,                 # our handlers, set up above
             access_log=False,                # the audit log records what matters, without query strings
             server_header=False, timeout_graceful_shutdown=SHUTDOWN_GRACE))

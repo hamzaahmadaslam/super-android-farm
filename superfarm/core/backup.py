@@ -11,7 +11,10 @@ A farm backup holds the settings of the whole farm and no Android data:
 
     <backup dir>/farm/<UTC time>/
         farm.tar.gz      config.yaml, every instance.yaml + state.json, automation/, vpn-profiles.json
-        manifest.json
+        manifest.json    with a seal: the archive's checksum signed with this farm's own key
+
+A farm backup decides what runs here (which image, privileged, at the next start), so one
+that does not carry this farm's seal is restored in a safe mode: see restore_farm().
 
 The manifest is written last: a folder without one is an interrupted backup and is ignored.
 A backup is named by its folder; `android-3/20250101-040000` is enough for one in the backup
@@ -38,6 +41,7 @@ backup cannot be made the operation is refused, unless the operator forced it.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
 import json
 import logging
@@ -56,6 +60,7 @@ from typing import IO, TYPE_CHECKING, Any
 import yaml
 
 from .. import __version__
+from ..config import Config
 from ..util.files import atomic_write, inside, locked, read_json, read_yaml, write_json
 from ..util.proc import kill_tree, spawn
 from . import device_profile
@@ -76,6 +81,9 @@ SPEC_FILE = "instance.yaml"
 FARM_ARCHIVE = "farm.tar.gz"
 VPN_NAMES = "vpn-profiles.json"
 SCHEDULE_STATE = ".schedule.json"
+# <home>/secrets/farm-key: the key this farm seals its own farm backups with, so a restore
+# can tell them from an archive somebody else made. It never goes into a backup.
+FARM_KEY = "farm-key"
 TAR_FLAGS = ["--xattrs", "--xattrs-include=*", "--acls", "--numeric-owner", "--sparse"]
 _DATA_FILE = {"zstd": "data.tar.zst", "gzip": "data.tar.gz", "none": "data.tar"}
 _COMPRESSION = {name: kind for kind, name in _DATA_FILE.items()}
@@ -342,10 +350,16 @@ class Backups:
     def _name(self, folder: Path) -> str:
         return f"{folder.parent.name}/{folder.name}"
 
-    def create_many(self, selector: str, *, reason: str = "manual", prune: bool = False) -> Task:
+    def create_many(self, selector: str, *, reason: str = "manual", prune: bool = False,
+                    exclusive: bool = False) -> Task:
         """Back up every Android a selector names, one after the other (each copy is heavy
         on the disk), as one task with a result per Android. An Android that was never
-        started has nothing to back up and is reported as skipped, not as failed."""
+        started has nothing to back up and is reported as skipped, not as failed.
+
+        `exclusive` is for an operator's own request (see core.tasks): TaskBusy is raised
+        while another task has not finished with one of these Androids, so a repeated click
+        does not copy everything twice. The scheduled run leaves it off and takes each
+        Android as it comes free."""
         mgr = self.mgr
         ids = mgr.select(selector)
 
@@ -368,7 +382,8 @@ class Backups:
             task.step(f"{len(ids) - failed} of {len(ids)} backed up" + (f", {len(removed)} old backup(s) removed" if removed else ""))
             return {"ok": len(ids) - failed, "failed": failed, "pruned": [str(p) for p in removed]}
 
-        return mgr.tasks.submit(f"backup.{reason}", f"back up {len(ids)} Android(s)", work, targets=ids)
+        return mgr.tasks.submit(f"backup.{reason}", f"back up {len(ids)} Android(s)", work, targets=ids,
+                                exclusive=exclusive)
 
     # -------------------------------------------------------------------- safety
     def safety(self, spec: InstanceSpec, reason: str, *, force: bool = False, task: Task | None = None) -> tuple[str, str]:
@@ -735,8 +750,26 @@ class Backups:
         if include_secrets:
             for top in (mgr.paths.vpn, mgr.paths.secrets):
                 if top.is_dir():
-                    add_tree(top)
+                    add_tree(top, lambda path: path == mgr.paths.secrets / FARM_KEY)
         return members
+
+    def _seal(self, digest: str, *, create: bool = False) -> str:
+        """The checksum of a farm archive signed with this farm's key (HMAC-SHA256), or ""
+        when the farm has no key. The checksum alone proves nothing about where an archive
+        comes from: it sits in a plain file next to it. The key never leaves the farm home."""
+        path = self.mgr.paths.secrets / FARM_KEY
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with locked(path):
+                if not path.is_file():
+                    atomic_write(path, secrets.token_hex(32), mode=0o600)
+        try:
+            key = path.read_bytes().strip()
+        except OSError:
+            return ""
+        if len(key) < 32:
+            return ""                 # a damaged key file seals nothing
+        return hmac.new(key, f"{FARM_KIND}:{digest}".encode(), hashlib.sha256).hexdigest()
 
     def create_farm(self, dest: str | os.PathLike | None = None, *, include_secrets: bool | None = None) -> Path:
         """Back up the farm's settings: config.yaml, every Android's instance.yaml and
@@ -769,11 +802,12 @@ class Backups:
                             tar.addfile(info, f)
                     except FileNotFoundError:
                         continue                  # removed while we were reading the tree
+            entry = _file_entry(archive)
             manifest = {
                 "kind": FARM_KIND, "format": MANIFEST_FORMAT, "superfarm_version": __version__,
                 "created": time.time(), "reason": "manual", "farm": mgr.prefix, "includes_secrets": include,
                 "instances": mgr.store.ids(), "entries": len(members), "data": FARM_ARCHIVE,
-                "files": {FARM_ARCHIVE: _file_entry(archive)},
+                "files": {FARM_ARCHIVE: entry}, "seal": self._seal(entry["sha256"], create=True),
             }
             atomic_write(folder / MANIFEST, json.dumps(manifest, indent=2), mode=0o600)
         except BaseException:
@@ -781,14 +815,28 @@ class Backups:
             raise
         return folder
 
-    def restore_farm(self, archive: str | os.PathLike, *, force: bool = False) -> dict:
+    def restore_farm(self, archive: str | os.PathLike, *, force: bool = False, trust: bool = False,
+                     restore_config: bool = False, restore_secrets: bool = False) -> dict:
         """Merge a farm backup into this farm. Nothing that exists is overwritten unless
         `force`: an Android whose id is taken, a file that is already there, and config.yaml
         are skipped and listed. No Android data is touched either way.
 
-        Returns {"restored": [...], "skipped": [...], "instances": [ids restored],
-        "missing_vpn_profiles": [...], "includes_secrets": bool}. Reload the configuration
-        afterwards when `config.yaml` is among the restored files."""
+        A backup this farm made itself (it carries the farm's seal) is restored in full. Any
+        other archive is somebody else's word about what should run on this machine, so by
+        default only what cannot do harm is taken from it:
+
+          * Android definitions lose what decides *what* is run and *when*: an image that is
+            not on this machine, an adopted data volume, extra boot arguments and
+            properties, autostart. Their saved runtime state and the schedules are left out.
+            `trust` keeps all of it as saved (your own farm before a reinstall).
+          * config.yaml is taken only with `restore_config`, VPN profiles, credentials and
+            tokens only with `restore_secrets`. Neither is implied by `force` or `trust`.
+
+        Returns {"restored": [...], "skipped": [...], "adjusted": [...], "instances": [ids
+        restored], "missing_vpn_profiles": [...], "includes_secrets": bool, "own": bool}.
+        `skipped` and `adjusted` say, with the reason, everything that was not taken as it
+        was. Reload the configuration afterwards when `config.yaml` is among the restored."""
+        from ..automation import plainyaml          # the settings inside are text from outside
         mgr, home = self.mgr, self.mgr.paths.home
         folder = self.locate(archive)
         manifest = self.manifest(folder)
@@ -796,36 +844,46 @@ class Backups:
             raise BackupError(f"{self._name(folder)} is not a farm backup")
         if not self.verify(folder):
             raise BackupError(f"{self._name(folder)} does not match its recorded checksums and was not restored")
+        recorded = manifest["files"].get(str(manifest.get("data")))
+        if not isinstance(recorded, dict):
+            raise BackupError(f"{self._name(folder)} does not say which file is its archive and was not restored")
+        seal = self._seal(str(recorded.get("sha256")))
+        own = bool(seal) and hmac.compare_digest(str(manifest.get("seal") or ""), seal)
+        trusted = own or bool(trust)
+        elsewhere = "made by another farm: "
         existing = set(mgr.store.ids())
         invalid: set[int] = set()
         profiles: list[str] = []
-        out: dict[str, Any] = {"restored": [], "skipped": [], "instances": [], "missing_vpn_profiles": [],
-                               "includes_secrets": bool(manifest.get("includes_secrets"))}
+        out: dict[str, Any] = {"restored": [], "skipped": [], "adjusted": [], "instances": [], "missing_vpn_profiles": [],
+                               "includes_secrets": bool(manifest.get("includes_secrets")), "own": own}
         with tarfile.open(folder / str(manifest["data"]), mode="r:gz") as tar:
             for member in tar:
                 parts = Path(member.name).parts
                 # Members are written one by one to checked paths; nothing is ever "extracted",
                 # so links, devices and names that climb out of the home cannot do anything.
+                # Every decision below is made on this spelling, the one the file is written
+                # under: `./config.yaml` and `secrets//x` are config.yaml and secrets/x.
+                name = "/".join(parts)
                 if (not member.isfile() or not parts or parts[0] not in _FARM_TOP or member.name.startswith("/")
-                        or any(p in ("..", "") for p in parts)):
+                        or any(p in ("..", "") for p in parts) or name == f"secrets/{FARM_KEY}"):
                     out["skipped"].append(f"{member.name} (not a farm file)")
                     continue
                 source = tar.extractfile(member)
                 content = source.read() if source is not None else b""
-                if member.name == VPN_NAMES:
+                if name == VPN_NAMES:
                     try:
                         profiles = [str(n) for n in json.loads(content)]
                     except (ValueError, TypeError):
                         profiles = []
                     continue
                 try:
-                    target = inside(home, home / member.name)
+                    target = inside(home, home / name)
                 except ValueError:
-                    out["skipped"].append(f"{member.name} (outside the farm home)")
+                    out["skipped"].append(f"{name} (outside the farm home)")
                     continue
                 if parts[0] == "instances":
                     if len(parts) != 3 or not parts[1].isdigit() or parts[2] not in ("instance.yaml", "state.json"):
-                        out["skipped"].append(f"{member.name} (not a farm file)")
+                        out["skipped"].append(f"{name} (not a farm file)")
                         continue
                     if int(parts[1]) in invalid:
                         continue
@@ -835,25 +893,74 @@ class Backups:
                         continue
                     if parts[2] == "instance.yaml":
                         try:
-                            InstanceSpec.model_validate({**(yaml.safe_load(content) or {}), "id": int(parts[1])})
-                        except (ValueError, yaml.YAMLError) as e:
+                            spec = InstanceSpec.model_validate({**(plainyaml.load(content) or {}), "id": int(parts[1])})
+                        except (ValueError, TypeError, yaml.YAMLError) as e:
                             out["skipped"].append(f"Android {parts[1]} (settings not valid here: {str(e)[:120]})")
                             invalid.add(int(parts[1]))         # and its state.json with it
                             continue
+                        if not trusted:
+                            changes = self._neutralise(spec)
+                            if changes:
+                                out["adjusted"].append(f"Android {spec.id}: " + "; ".join(changes))
+                            # What was checked is what is written, not the archive's own text.
+                            content = yaml.safe_dump(spec.model_dump(mode="json"), sort_keys=False, allow_unicode=True).encode()
                         out["instances"].append(int(parts[1]))
-                elif target.exists() and not force:
-                    out["skipped"].append(f"{member.name} (exists)")
+                    elif not trusted:
+                        # What another farm observed about its own data says nothing about ours.
+                        out["skipped"].append(f"{name} ({elsewhere}restore with `trust` to take it)")
+                        continue
+                elif name == "config.yaml" and not (own or restore_config):
+                    out["skipped"].append(f"{name} ({elsewhere}restore with `restore_config` to take it)")
                     continue
+                elif parts[0] in ("secrets", "vpn") and not (own or restore_secrets):
+                    out["skipped"].append(f"{name} ({elsewhere}restore with `restore_secrets` to take it)")
+                    continue
+                elif name == "automation/schedules.json" and not trusted:
+                    # A schedule starts runs on its own; nobody here asked for these.
+                    out["skipped"].append(f"{name} ({elsewhere}restore with `trust` to take it)")
+                    continue
+                elif target.exists() and not force:
+                    out["skipped"].append(f"{name} (exists)")
+                    continue
+                if name == "config.yaml":
+                    try:
+                        Config.model_validate(plainyaml.load(content) or {})
+                    except (ValueError, TypeError, yaml.YAMLError) as e:
+                        # A config the daemon cannot load would stop it at its next start.
+                        out["skipped"].append(f"{name} (not a valid configuration: {str(e)[:120]})")
+                        continue
                 private = parts[0] in ("secrets", "vpn") or "values" in parts
                 if parts[0] == "secrets":
                     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 atomic_write(target, content, mode=0o600 if private else 0o644)
-                out["restored"].append(member.name)
+                out["restored"].append(name)
         out["instances"].sort()
         # Judged at the end: a backup made with secrets has just brought its profiles along.
         out["missing_vpn_profiles"] = [n for n in profiles if n == os.path.basename(n) and not (mgr.paths.vpn / n).is_file()]
         return out
 
+    def _neutralise(self, spec: InstanceSpec) -> list[str]:
+        """Take out of an Android definition from somebody else's archive everything that
+        decides what is run on this machine and when. Returns what was changed, in words."""
+        changes: list[str] = []
+        if spec.image and not self.mgr.docker.image_exists(spec.image):
+            # Same rule as _new_instance: a file must not be able to make this farm fetch and
+            # run (privileged) an image it names; only one already on this machine is kept.
+            changes.append(f"image {spec.image} is not on this machine, the farm's own image is used")
+            spec.image = None
+        if spec.data_volume:
+            changes.append(f"data volume {spec.data_volume} not adopted")
+            spec.data_volume = None
+        if spec.extra_boot_args:
+            changes.append("extra boot arguments dropped (" + " ".join(spec.extra_boot_args)[:120] + ")")
+            spec.extra_boot_args = []
+        if spec.extra_props:
+            changes.append("extra properties dropped (" + " ".join(sorted(spec.extra_props))[:120] + ")")
+            spec.extra_props = {}
+        if spec.autostart:
+            changes.append("autostart switched off")
+            spec.autostart = False
+        return changes
 
 def _say(task: Task | None, message: str) -> None:
     if task is not None:

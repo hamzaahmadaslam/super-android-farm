@@ -1,17 +1,30 @@
-"""Androids: create, change, start and stop, clone, delete, logs."""
+"""Androids: create, change, start and stop, clone, delete, logs.
+
+Repeated and simultaneous requests (a double click, two tabs):
+
+    start, stop, restart, recreate, delete, bulk
+        one request per Android at a time: while a task has not finished with an Android,
+        another of these that names it is refused with 409 `busy`; `detail` holds the task's
+        id and the Androids in question (see core.tasks)
+    create
+        makes new Androids each time it is called. A client that may send the same create
+        twice (a retry, a double click) adds an `Idempotency-Key` header and gets the first
+        answer again instead of a second set (see common.Idempotency)
+"""
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import Field
 from starlette.responses import JSONResponse
 
 from ...core import instances as instances_mod
+from ...core.tasks import TaskBusy
 from ..audit import note
 from ..auth import require
-from ..common import Body, accepted, bounded, farm_of, instance_id
+from ..common import IDEMPOTENCY_HEADER, Body, accepted, bounded, farm_of, instance_id
 
 router = APIRouter(dependencies=[Depends(require)])
 
@@ -73,10 +86,19 @@ def list_instances(request: Request) -> dict:
 
 
 @router.post("/api/instances", status_code=201)
-def create(body: Create, request: Request) -> dict:
-    specs = farm_of(request).instances.create(count=body.count, name=body.name, template=body.template)
-    note(request, ids=[s.id for s in specs], count=len(specs))
-    return {"instances": [s.model_dump(mode="json") for s in specs]}
+def create(body: Create, request: Request, response: Response) -> dict:
+    """Add Androids. With an `Idempotency-Key` header (any 1-128 printable characters, e.g. a
+    UUID made when the form was opened) a repeat of the same request within ten minutes
+    returns the first answer, marked `Idempotency-Replayed: true`, and creates nothing."""
+    def make() -> dict:
+        specs = farm_of(request).instances.create(count=body.count, name=body.name, template=body.template)
+        return {"instances": [s.model_dump(mode="json") for s in specs]}
+
+    answer, replayed = request.app.state.idempotency.run(request.headers.get(IDEMPOTENCY_HEADER), body, make)
+    if replayed:
+        response.headers["Idempotency-Replayed"] = "true"
+    note(request, ids=[s["id"] for s in answer["instances"]], count=len(answer["instances"]))
+    return answer
 
 
 @router.post("/api/instances/bulk")
@@ -111,6 +133,9 @@ def delete(id: str, request: Request, keep_data: bool = False, force: bool = Fal
     farm = farm_of(request)
     n = instance_id(farm, id)
     note(request, ids=[n], force=force or None)
+    holder = farm.tasks.busy_targets().get(n)
+    if holder is not None:              # the same rule as for the actions that run as tasks
+        raise TaskBusy(holder, [n])
     result = farm.instances.delete(n, keep_data=keep_data, force=force)
     return JSONResponse(jsonable_encoder({"deleted": n, **(result or {})}))
 

@@ -8,7 +8,9 @@ Scenarios, one Android at a time (never two running together):
     software + direct   create -> start -> ADB -> outbound internet -> stop -> delete
     network none        boots, ADB works, nothing leaves
     overrides           cpus / memory / cpuset / fps visible in `docker inspect` and in Android
-    capacity            over capacity warns; with enforce_capacity it refuses; force overrides
+    capacity            over capacity warns; with enforce_capacity it refuses; force overrides;
+                        a restart is never refused after the Android was stopped
+    version guard       another Android version on existing data is refused before anything changes
     backup              marker file -> backup -> restore as new (offline twin) -> delete -> boot the copy
     integrated GPU      boots on Mesa, not SwiftShader; screenshot is not black
     renderer change     software -> integrated GPU rebuilds the pair and clears shader caches
@@ -41,7 +43,7 @@ import pytest
 from superfarm.config import Config, update_config
 from superfarm.core.adb import Adb, AdbError
 from superfarm.core.docker import Docker
-from superfarm.core.instances import InstanceManager, OverCapacity, mem_available_mb
+from superfarm.core.instances import InstanceManager, NeedsForce, OverCapacity, mem_available_mb
 from superfarm.core.store import Store
 from superfarm.core.tasks import TaskManager
 from superfarm.host import gpu as host_gpu
@@ -376,6 +378,107 @@ def test_capacity_warns_by_default_and_refuses_only_when_enforced(live):
     mgr.delete(1)
 
 
+def test_enforced_capacity_never_takes_a_running_android_away(live):
+    """(f) The defect this guards against: with enforce_capacity on and no force, a restart
+    stopped the Android and then refused to start it. A refusal has to come before anything
+    is stopped, for one Android and for a bulk restart or recreate alike."""
+    farm = live({"gpu": {"mode": "software"}, "network": {"mode": "none"}, "backup": {"auto_before_risky": False}})
+    mgr, docker = farm.mgr, farm.docker
+    names = mgr.names(1)
+    mgr.create()
+    first = mgr.start(1)
+    # From now on the machine counts as full, and the estimate is enforced.
+    farm.reconfigure({"performance": {"enforce_capacity": True, "memory_guard_mb": 10_000_000}})
+    assert mgr.capacity()["over"] and mgr.capacity()["enforced"]
+
+    def started_at(name: str) -> str:
+        return inspect(docker, name)["State"]["StartedAt"]
+
+    def container_ids() -> dict[str, str]:
+        return {n: inspect(docker, n)["Id"] for n in (names.android, names.net)}
+
+    ids, began = container_ids(), started_at(names.android)
+
+    # running: it is already counted, so restarting it is no capacity question and it comes back
+    restarted = mgr.restart(1)
+    assert restarted["state"] == "booted" and restarted["recreated"] is False and restarted["warnings"] == [], restarted
+    assert docker.running(names.android) and container_ids() == ids and started_at(names.android) != began
+
+    task = farm.tasks.wait(mgr.bulk("restart", "all"), timeout=600)
+    assert task.state == "done" and task.results[1]["ok"], task.results
+    assert docker.running(names.android) and mgr.status(1)["state"] == "booted"
+
+    task = farm.tasks.wait(mgr.bulk("recreate", "all"), timeout=600)
+    assert task.results[1]["ok"], task.results
+    assert docker.running(names.android) and container_ids() != ids
+
+    # stopped: starting it would add an Android, so it is refused, with nothing touched
+    mgr.stop(1)
+    ids = container_ids()
+    stopped_state = {n: inspect(docker, n)["State"]["FinishedAt"] for n in ids}
+    for action in (mgr.restart, mgr.recreate):
+        with pytest.raises(OverCapacity):
+            action(1)
+    task = farm.tasks.wait(mgr.bulk("restart", "all"), timeout=600)
+    assert not task.results[1]["ok"] and "OverCapacity" in task.results[1]["detail"], task.results
+    assert container_ids() == ids and {n: inspect(docker, n)["State"]["FinishedAt"] for n in ids} == stopped_state
+    assert not docker.running(names.android) and not docker.running(names.net)
+    assert "OverCapacity" in mgr.status(1)["last_error"]
+
+    task = farm.tasks.wait(mgr.bulk("restart", "all", force=True), timeout=600)
+    assert task.results[1]["ok"] and "over capacity" in task.results[1]["detail"], task.results
+    assert docker.running(names.android) and mgr.adb(1).shell(["echo", "back"]) == "back"
+    report("capacity restart", first_boot_seconds=first["boot_seconds"], restart_seconds=restarted["boot_seconds"])
+    mgr.delete(1)
+
+
+def test_android_version_guard_on_existing_data(live):
+    """(i) Two Androids of different versions need a second image, which this test does not
+    fetch. What is tested live is the guard: once an Android has booted, another version is
+    refused, at update and again at start, before any image is looked for or anything stops."""
+    absent = {v: {"base": f"sftest-e2e-absent:{v}", "tag": f"sftest-e2e-absent:{v}"} for v in ("12", "14")}
+    farm = live({"gpu": {"mode": "software"}, "network": {"mode": "none"}, "backup": {"auto_before_risky": False},
+                 "android": {"images": absent}})
+    mgr, docker = farm.mgr, farm.docker
+    names = mgr.names(1)
+    assert [row["version"] for row in mgr.images.status()] == ["12", "13", "14"]
+    assert {row["version"]: row["features"]["nvidia"]["supported"] for row in mgr.images.status()} == {
+        "12": False, "13": True, "14": False}
+    mgr.create(template={"android_version": "13"})
+    assert mgr.status(1)["data_android_version"] == ""
+    first = mgr.start(1)
+    assert mgr.status(1)["data_android_version"] == "13"
+    marker = "/data/local/tmp/sfte2e-version.txt"
+    mgr.adb(1).shell(["sh", "-c", f"echo kept > {marker}"])
+    container = inspect(docker, names.android)["Id"]
+
+    for other in ("12", "14"):
+        with pytest.raises(NeedsForce, match="written by Android 13"):
+            mgr.update(1, {"android_version": other})
+    assert mgr.store.get(1).android_version == "13"
+
+    # forced at update: saved, and the running Android is not touched by saving
+    assert mgr.update(1, {"android_version": "12"}, force=True).android_version == "12"
+    assert docker.running(names.android)
+    # a downgrade is refused again when it would take effect, and the Android keeps running
+    for action in (mgr.restart, mgr.recreate):
+        with pytest.raises(NeedsForce, match="written by Android 13 and it is now set to Android 12"):
+            action(1)
+    assert docker.running(names.android) and inspect(docker, names.android)["Id"] == container
+    assert mgr.adb(1).shell(["cat", marker]) == "kept"
+    status = mgr.status(1)
+    assert status["android_version"] == "12" and status["data_android_version"] == "13" and "NeedsForce" in status["last_error"]
+    assert not any(docker.image_exists(entry["tag"]) for entry in absent.values())       # nothing was fetched
+
+    # going back to the version that wrote the data needs no force, and the data is as it was
+    assert mgr.update(1, {"android_version": "13"}).android_version == "13"
+    again = mgr.restart(1)
+    assert again["state"] == "booted" and again["recreated"] is False and again["warnings"] == [], again
+    assert mgr.adb(1).shell(["cat", marker]) == "kept"
+    report("version guard", first_boot_seconds=first["boot_seconds"], restart_seconds=again["boot_seconds"])
+    mgr.delete(1)
+
+
 def test_backup_delete_restore_round_trip(live):
     """(g) A marker file survives backup -> restore as a new Android, with owners, modes and
     extended attributes intact; a copy next to its original is created offline; deleting an
@@ -431,6 +534,20 @@ def test_backup_delete_restore_round_trip(live):
            archive_mb=size_mb, compression=manifest["compression"], extended_attributes=original[1])
     farm.reconfigure({"backup": {"auto_before_risky": False}})
     mgr.delete(copy_id)
+
+    # backup -> delete -> restore: with the original and its copy both gone, the same backup
+    # comes back as a new Android, and this time nothing turns its network off
+    assert mgr.store.ids() == [] and docker.volumes(PREFIX + "-data-") == []
+    again_id = backups.restore(folder)
+    again = mgr.store.get(again_id)
+    assert again.device == spec.device and again.network.mode is None and "same identity" not in again.notes
+    assert fingerprint(farm, again_id) == original
+    third = mgr.start(again_id)
+    assert third["state"] == "booted"
+    assert mgr.adb(again_id).shell(["cat", marker]) == f"round-trip-{spec.device.android_id}"
+    assert owners(again_id) == before
+    report("backup after delete", restored_boot_seconds=third["boot_seconds"], restored_as=again_id)
+    mgr.delete(again_id)
     assert [b["reason"] for b in backups.list()] == ["before-delete", "manual"]
 
 

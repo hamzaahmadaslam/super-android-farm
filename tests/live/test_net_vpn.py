@@ -437,6 +437,46 @@ def test_a_wiped_firewall_is_noticed_and_put_back(farm, lab):
              "Docker to report the sidecar healthy", interval=3)
 
 
+def test_ipv6_switched_back_on_inside_the_namespace_meets_a_closed_firewall(farm, lab):
+    """With network.ipv6 off the farm switches IPv6 off by sysctl, and that is a switch
+    Android's network daemon (privileged, same namespace) can flip back. The IPv6 rules have
+    to be there anyway, and the sidecar has to keep checking them."""
+    farm.configure(mode="none")
+    r = farm.start(farm.resolved(5), network=lab.wan)
+    assert wait_ready(farm.docker, r, timeout=30)["ready"]
+    net = r.names.net
+    assert farm.docker.exec(net, ["cat", "/proc/sys/net/ipv6/conf/all/disable_ipv6"]).out == "1"
+    assert not farm.docker.exec(net, ["cat", "/proc/net/if_inet6"]).out, "IPv6 should start switched off"
+
+    # by hand, what Android is able to do
+    farm.docker.run(["run", "--rm", "--name", f"{LAB}-client-v6", "--privileged", "--network", f"container:{net}",
+                     "--no-healthcheck", "--entrypoint", "sh", lab.image, "-c",
+                     "echo 0 >/proc/sys/net/ipv6/conf/eth0/disable_ipv6"], timeout=60)
+    wait_for(lambda: "eth0" in farm.docker.exec(net, ["cat", "/proc/net/if_inet6"]).stdout, 15,
+             "IPv6 to come up on the uplink", interval=0.5)
+
+    def dropped() -> int:
+        """Packets the IPv6 OUTPUT policy has dropped; -1 when the policy is not DROP."""
+        first = farm.docker.exec(net, ["ip6tables", "-v", "-S", "OUTPUT"], check=False).stdout.splitlines()[:1]
+        words = first[0].split() if first else []
+        return int(words[words.index("-c") + 1]) if words[:3] == ["-P", "OUTPUT", "DROP"] else -1
+
+    rules = farm.docker.exec(net, ["ip6tables", "-S"]).stdout.splitlines()
+    assert rules == ["-P INPUT DROP", "-P FORWARD DROP", "-P OUTPUT DROP", "-A INPUT -i lo -j ACCEPT", "-A OUTPUT -o lo -j ACCEPT"]
+    # the stack is alive (it announces its new address) and the policy is what stops it
+    wait_for(lambda: dropped() > 0, 15, "the IPv6 policy to drop the namespace's own announcements")
+    st = net_status(farm.docker, r)
+    assert st["ready"] and st["killswitch"]["active"] and not st["killswitch"]["problems"], st
+
+    # checked, not assumed: an opened IPv6 policy is noticed by the sidecar and put back
+    farm.docker.exec(net, ["ip6tables", "-P", "OUTPUT", "ACCEPT"], timeout=20)
+    assert not farm.docker.exec(net, ["/sf/killswitch.sh", "check"], timeout=20, check=False).ok
+    assert not farm.docker.exec(net, ["/sf/healthcheck.sh"], timeout=20, check=False).ok
+    assert not net_status(farm.docker, r)["killswitch"]["active"]
+    wait_for(lambda: dropped() >= 0, 45, "the sidecar to reload its IPv6 rules", interval=2)
+    assert net_status(farm.docker, r)["killswitch"]["active"]
+
+
 @pytest.mark.skipif(os.path.exists("/sys/module/wireguard"), reason="this host has WireGuard loaded; the error path cannot be shown")
 def test_wireguard_without_kernel_support_says_how_to_fix_it(farm, lab):
     key = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="

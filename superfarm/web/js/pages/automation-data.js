@@ -2,13 +2,14 @@
 // server) and the values that programs and flows type.
 
 import { del, get, post, put } from '../api.js';
-import { badge, button, card, empty, field, loadInstances, option } from '../common.js';
+import { badge, button, card, emptyState, field, loadInstances, option } from '../common.js';
 import { confirmDialog, openDialog } from '../components/dialog.js';
 import { dataTable } from '../components/table.js';
-import { attempt, ok } from '../components/toast.js';
+import { attempt, ok, warn } from '../components/toast.js';
 import { h, replace, when } from '../dom.js';
 
 const API = '/api/automation';
+const empty = (title, hint, ...actions) => emptyState('automation', title, hint, ...actions);
 const flowPath = (name) => `${API}/flows/${name.split('/').map(encodeURIComponent).join('/')}`;
 
 const TEMPLATE = `# A flow is a list of steps run on each selected Android on its own.
@@ -112,12 +113,13 @@ export async function flowsTab(panel) {
         button('Validate', validate), button('Save', save, 'primary'),
         button('Run…', () => {
           const flow = flows.find((f) => f.name === name.value.trim());
-          if (!flow) { ok('Save the flow first, then run it.'); return; }
-          runDialog('flow', flow.name, Object.keys(flow.variables || {}));
+          if (!flow) { ok('Save the flow first, then run it.'); return undefined; }
+          return runDialog('flow', flow.name, Object.keys(flow.variables || {}));
         }),
         button('Delete', async () => {
           const target = name.value.trim();
-          if (!target || !await confirmDialog({ title: 'Delete this flow?', message: `"${target}" is removed.`, confirm: 'Delete', danger: true })) return;
+          if (!target) { name.focus(); warn('Open a flow from the list, or type its name, then delete it.'); return; }
+          if (!await confirmDialog({ title: 'Delete this flow?', message: `"${target}" is removed.`, confirm: 'Delete', danger: true })) return;
           if (await attempt(() => del(flowPath(target)), 'Flow deleted.')) { name.value = ''; text.value = ''; replace(verdict); await load(); }
         }, 'danger')),
       text, verdict,
@@ -193,7 +195,7 @@ export async function valuesTab(panel) {
       card('Shared values',
         h('form', { class: 'toolbar', onsubmit: (event) => {
           event.preventDefault();
-          attempt(async () => {
+          return attempt(async () => {
             await put(`${API}/values/shared/${encodeURIComponent(sharedName.value.trim())}`, { value: sharedValue.value });
             sharedName.value = '';
             sharedValue.value = '';
@@ -204,7 +206,7 @@ export async function valuesTab(panel) {
       card('Pools',
         h('form', { class: 'stack', onsubmit: (event) => {
           event.preventDefault();
-          attempt(async () => {
+          return attempt(async () => {
             const lines = poolLines.value.split('\n').map((l) => l.trim()).filter(Boolean);
             if (!lines.length) throw new Error('Paste at least one line.');
             const result = await post(`${API}/values/pools/${encodeURIComponent(poolName.value.trim())}`, { lines });
@@ -217,7 +219,7 @@ export async function valuesTab(panel) {
     card('Values of one Android',
       h('form', { class: 'toolbar', onsubmit: (event) => {
         event.preventDefault();
-        attempt(async () => {
+        return attempt(async () => {
           if (!pick.value) throw new Error('Create an Android first.');
           await put(`${API}/values/instances/${pick.value}/${encodeURIComponent(ownName.value.trim())}`, { value: ownValue.value });
           ownName.value = '';

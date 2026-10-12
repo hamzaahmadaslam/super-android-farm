@@ -2,10 +2,11 @@
 // control microphones, and listen to one device on the host's speakers.
 
 import { del, get, post, upload } from '../api.js';
-import { badge, button, card, empty, field, loadInstances, option, pageHead } from '../common.js';
+import { badge, button, card, emptyState, field, loadInstances, option, pageHead } from '../common.js';
 import { dataTable } from '../components/table.js';
 import { attempt } from '../components/toast.js';
 import { bytes, h, replace, when } from '../dom.js';
+import { icon } from '../icons.js';
 
 const RUNNING = new Set(['running', 'booted']);
 
@@ -32,7 +33,7 @@ export async function render(root, _params, scope) {
       { title: 'Size', class: 'num', cell: (s) => (s.size ? bytes(s.size) : '') },
       { title: 'Details', cell: (s) => (s.kind === 'live' ? [`Send your stream to ${s.server} with key `, h('code', null, s.key), s.active ? [' ', badge('ok', 'receiving')] : ''] : when(s.modified)) },
     ],
-    empty: empty('No media yet', 'Upload a video above.'),
+    empty: emptyState('media', 'No media yet', 'Upload a video or sound file above; it can then be played to the camera of any selection.'),
   });
 
   async function loadSources() {
@@ -49,8 +50,8 @@ export async function render(root, _params, scope) {
     const data = await get('/api/camera');
     const a = data.available;
     replace(availability, a.ok
-      ? h('div', { class: 'banner ok' }, `Cameras are ready: ${a.devices.usable.length} of ${a.devices.slots} devices usable.`)
-      : h('div', { class: 'banner warn' }, h('div', { class: 'grow' }, h('strong', null, 'Cameras cannot work on this host yet.'),
+      ? h('div', { class: 'banner ok' }, icon('check'), h('div', { class: 'grow' }, `Cameras are ready: ${a.devices.usable.length} of ${a.devices.slots} devices usable.`))
+      : h('div', { class: 'banner warn' }, icon('alert'), h('div', { class: 'grow' }, h('strong', null, 'Cameras cannot work on this host yet.'),
         h('ul', null, a.reasons.map((reason) => h('li', null, reason))))));
     const list = data.status.feeds || [];
     replace(feeds, list.length === 0 ? h('p', { class: 'muted' }, 'Nothing is playing.')
@@ -86,8 +87,8 @@ export async function render(root, _params, scope) {
         h('div', { class: 'fields' },
           field('Androids (selector)', selector), field('Picture', source), field('Sound', sound)),
         h('div', { class: 'row' },
-          button('Play', () => cameraAction('play', { source: source.value, sound: sound.value }, 'Playing.'), 'primary'),
-          button('Stop', () => cameraAction('stop', {}, 'Stopped.')),
+          button('Play', () => cameraAction('play', { source: source.value, sound: sound.value }, 'Playing.'), 'primary', 'play'),
+          button('Stop', () => cameraAction('stop', {}, 'Stopped.'), '', 'stop'),
           button('Mute microphones', () => cameraAction('mic', { mode: 'mute' }, 'Muted.')),
           button('Unmute', () => cameraAction('mic', { mode: 'unmute' }, 'Unmuted.')),
           button('Re-attach cameras', () => cameraAction('attach', {}, 'Cameras attached.')),
@@ -96,13 +97,13 @@ export async function render(root, _params, scope) {
       card('Media library',
         h('form', { class: 'toolbar', onsubmit: (event) => {
           event.preventDefault();
-          attempt(async () => {
+          return attempt(async () => {
             if (!file.files.length) throw new Error('Choose a video or sound file first.');
             await upload('/api/media', file.files[0]);
             file.value = '';
             await loadSources();
           }, 'Added to the library.');
-        } }, file, h('button', { type: 'submit', class: 'btn primary' }, 'Upload')),
+        } }, file, h('button', { type: 'submit', class: 'btn primary' }, icon('upload'), 'Upload')),
         sources.el),
       card('Listen to one device',
         h('p', { class: 'small muted' }, 'Plays that Android’s sound on the speakers of the machine running the daemon. One device at a time.'),

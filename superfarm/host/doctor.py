@@ -446,9 +446,10 @@ def check_ram(c: Ctx) -> Check:
     total = mem.get("MemTotal", 0)
     if not total:
         return Check("mem.ram", "Memory", SKIP, "could not read /proc/meminfo")
-    est = capacity.estimate(c.config, c.gpus(), root=c.root)
+    est = capacity.estimate(c.config, c.gpus(), root=c.root, paths=c.paths)
     detail = (f"{total / 1024:.1f} GB total, {mem.get('MemAvailable', 0) / 1024:.1f} GB available; room for about "
-              f"{est['limits']['ram']['max']} Androids by memory ({est['limits']['ram']['per_android_mb']} MB each)")
+              f"{est['limits']['ram']['max']} Androids by memory ({est['limits']['ram']['per_android_mb']} MB each "
+              f"in {est['mode']} mode)")
     need = c.config.resources.memory_mb + c.config.performance.reserve_host_mb // 2
     if total < need:
         return Check("mem.ram", "Memory", FAIL, detail, f"At least {need // 1024 + 1} GB of RAM is needed for one Android.")
@@ -732,7 +733,9 @@ def check_nvidia_relay(c: Ctx) -> Check:
 # ============================================================ tools
 
 def _tool_check(c: Ctx, cid: str, title: str, name: str, version_argv: list[str], pkg: str,
-                minimum: tuple[int, ...] = (), why_min: str = "", required: bool = True) -> Check:
+                minimum: tuple[int, ...] = (), why_min: str = "", required: bool = True, newer: str = "") -> Check:
+    """`newer`: where a recent enough version comes from. Installing the package again is no
+    fix when the installed one is the distribution's and too old."""
     if not c.which(name):
         return Check(cid, title, FAIL if required else WARN, f"`{name}` is not on PATH", c.distro.install_command(pkg))
     r = c.tool(version_argv, timeout=10)
@@ -740,7 +743,7 @@ def _tool_check(c: Ctx, cid: str, title: str, name: str, version_argv: list[str]
     line = next((ln.strip() for ln in text.splitlines() if re.search(r"\d+\.\d+", ln)), "")
     v = _version(line)
     if minimum and v and v < minimum:
-        return Check(cid, title, WARN, f"{line[:80]}: {why_min}", c.distro.install_command(pkg))
+        return Check(cid, title, WARN, f"{line[:80]}: {why_min}", newer or c.distro.install_command(pkg))
     return Check(cid, title, OK, line[:80] or "installed")
 
 
@@ -750,7 +753,11 @@ def check_adb(c: Ctx) -> Check:
 
 def check_scrcpy(c: Ctx) -> Check:
     return _tool_check(c, "tools.scrcpy", "scrcpy", "scrcpy", ["scrcpy", "--version"], "scrcpy", (2, 1),
-                       "audio capture and listening to a device need scrcpy 2.1 or newer", required=False)
+                       "audio capture and listening to a device need scrcpy 2.1 or newer", required=False,
+                       # Seen on Ubuntu 24.04, whose package is scrcpy 1.25.
+                       newer="This distribution's scrcpy package is older than that. Use the upstream build: download "
+                             "scrcpy-linux-x86_64-*.tar.gz from https://github.com/Genymobile/scrcpy/releases, unpack "
+                             "it and put its folder on PATH ahead of the packaged one.")
 
 
 def check_ffmpeg(c: Ctx) -> Check:
@@ -817,7 +824,8 @@ def check_ports(c: Ctx) -> Check:
     if not probe(host, cfg.server.port):
         status = WARN
         notes.append(f"panel port {cfg.server.port} is in use (fine if the farm daemon is already running)")
-        fix = f"ss -ltnp 'sport = :{cfg.server.port}'    # shows what holds it; or: sf config set server.port <free port>"
+        fix = (f"ss -ltnp 'sport = :{cfg.server.port}'    # shows what holds it\n"
+               f"sf config set server.port {cfg.server.port + 1}    # or move the panel to a free port")
     else:
         notes.append(f"panel port {cfg.server.port} is free")
     rng = c.read("proc/sys/net/ipv4/ip_local_port_range").split()
@@ -855,7 +863,8 @@ def check_server_host(c: Ctx) -> Check:
     tls = bool(s.tls_cert and s.tls_key)
     if tls:
         return Check("net.server_host", "Panel exposure", WARN,
-                     f"panel listens on {s.host} with TLS; whoever has the API token controls every Android",
+                     f"panel listens on {s.host} with TLS; whoever has the API token has root on this machine "
+                     "(Androids are privileged containers and the daemon controls Docker)",
                      "Keep the token secret and firewall the port to the addresses that need it.")
     return Check("net.server_host", "Panel exposure", WARN,
                  f"panel listens on {s.host} without TLS: the API token and every screen travel in clear text",

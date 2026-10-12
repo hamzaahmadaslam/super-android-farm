@@ -11,6 +11,9 @@ Order of the wrappers around the routes, outermost first:
             that says nothing
     CORS    only when server.allowed_origins lists other origins
     Audit   one line per state-changing request, written when its outcome is known
+
+`listen_host` is the address the daemon is bound to. The app keeps it for its whole life and
+decides from it, not from the config file, whether callers must authenticate (auth.py).
 """
 from __future__ import annotations
 
@@ -33,16 +36,17 @@ from .. import __version__
 from ..farm import Farm
 from ..paths import PACKAGE_DIR
 from . import errors, uploads, ws
-from .audit import AuditLog, AuditMiddleware
+from .audit import ANONYMOUS_LOG, AuditLog, AuditMiddleware
 from .auth import CSRF_HEADER, Auth, host_allowed, require
-from .routes import automation, backups, control, instances, media, net, stream, system
+from .common import IDEMPOTENCY_HEADER, Idempotency
+from .routes import ai, approvals, automation, backups, control, instances, media, net, stream, system
 
 log = logging.getLogger("superfarm.api")
 
 WEB_DIR = PACKAGE_DIR / "web"
 # instances last: its `/api/instances/{id}/{action}` would otherwise be asked first about
 # the more specific POST routes other modules define under the same prefix.
-MODULES = (system, net, control, stream, media, automation, backups, instances)
+MODULES = (system, net, control, stream, media, automation, backups, approvals, ai, instances)
 SECURITY_HEADERS = [
     # The panel is static files from this origin and nothing else: no inline script, no
     # third-party host, never inside somebody else's frame. data: and blob: cover pictures
@@ -70,15 +74,15 @@ _NO_PANEL = """<!doctype html>
 class Gate:
     """Pure ASGI wrapper around the whole app (HTTP and WebSocket)."""
 
-    def __init__(self, app, farm: Farm):
-        self.app, self.farm = app, farm
+    def __init__(self, app, farm: Farm, listen_host: str | None = None):
+        self.app, self.farm, self.listen_host = app, farm, listen_host
 
     async def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
         host = next((v.decode("latin-1") for k, v in scope.get("headers", []) if k == b"host"), "")
-        if not host_allowed(host, self.farm.config):
+        if not host_allowed(host, self.farm.config, self.listen_host):
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
             else:
@@ -148,10 +152,12 @@ def _bounded(receive, limit: int):
     return bounded
 
 
-def create_app(farm: Farm, *, web_dir: Path | None = None) -> FastAPI:
+def create_app(farm: Farm, *, web_dir: Path | None = None, listen_host: str | None = None) -> FastAPI:
     config = farm.config
-    audit = AuditLog(farm.paths.logs / "audit.log", max_bytes=config.logging.max_mb * 1024 * 1024,
-                     keep=config.logging.keep, enabled=config.server.audit_log)
+    audit, audit_anonymous = (
+        AuditLog(farm.paths.logs / name, max_bytes=config.logging.max_mb * 1024 * 1024,
+                 keep=config.logging.keep, enabled=config.server.audit_log)
+        for name in ("audit.log", ANONYMOUS_LOG))
     events = ws.EventHub(farm)
 
     @contextlib.asynccontextmanager
@@ -167,32 +173,39 @@ def create_app(farm: Farm, *, web_dir: Path | None = None) -> FastAPI:
                 with contextlib.suppress(Exception):
                     await built["h264"].close_all()
             audit.close()
+            audit_anonymous.close()
 
     # The interactive API pages load scripts from a CDN, which this server's own content
     # policy forbids (and a farm may be offline). The schema itself stays available.
     app = FastAPI(title="Super Farm", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None,
                   openapi_url=None)
     app.state.farm = farm
-    app.state.auth = Auth(farm)
+    app.state.auth = Auth(farm, listen_host)
     app.state.audit = audit
+    app.state.audit_anonymous = audit_anonymous
+    app.state.idempotency = Idempotency()
     app.state.events = events
 
     def reconfigure() -> None:
         """Called after the config changed: settings this layer keeps a copy of."""
         c = farm.config
-        audit.configure(max_bytes=c.logging.max_mb * 1024 * 1024, keep=c.logging.keep, enabled=c.server.audit_log)
+        for each in (audit, audit_anonymous):
+            each.configure(max_bytes=c.logging.max_mb * 1024 * 1024, keep=c.logging.keep, enabled=c.server.audit_log)
 
     app.state.reconfigure = reconfigure
 
     errors.install(app)
 
     # add_middleware puts each new one outside the previous: Audit innermost, Gate outermost.
-    app.add_middleware(AuditMiddleware, audit=audit)
+    # Inside Audit: it names the AI caller (if any) on the line Audit writes afterwards.
+    app.add_middleware(approvals.CallerMiddleware)
+    app.add_middleware(AuditMiddleware, audit=audit, anonymous=audit_anonymous)
     if config.server.allowed_origins:
         app.add_middleware(CORSMiddleware, allow_origins=list(config.server.allowed_origins),
                            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-                           allow_headers=["authorization", "content-type", CSRF_HEADER], max_age=600)
-    app.add_middleware(Gate, farm=farm)
+                           allow_headers=["authorization", "content-type", CSRF_HEADER, IDEMPOTENCY_HEADER],
+                           expose_headers=["idempotency-replayed"], max_age=600)
+    app.add_middleware(Gate, farm=farm, listen_host=listen_host)
 
     app.include_router(system.public)
     for module in MODULES:

@@ -284,7 +284,7 @@ class Farm:
         self.events: list[str] = []
         b = self.mgr.backends
         b.gpu_choose = self._choose
-        b.capacity_estimate = lambda config, running: {
+        b.capacity_estimate = lambda config, paths, running: {
             "max_instances": self.capacity_max, "binding": "ram", "advice": ["add RAM"], "running_seen": running}
         b.sidecar_run_args = fake_sidecar_args
         b.net_wait_ready = lambda docker, r, timeout=90: (self.events.append("net-wait"), self.net_ready)[1]

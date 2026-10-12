@@ -47,6 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from ..config import AutomationConfig
 from ..paths import PACKAGE_DIR
+from . import plainyaml
 from .memory import save_png
 from .profiles import AppProfile, OverlayRule, Profiles
 from .runtime import ForbiddenTap, Session, StepFailed, StepTimeout
@@ -546,7 +547,7 @@ def parse_flow_text(text: str, *, name: str = "", forbidden_words: tuple[str, ..
     if len(text.encode("utf-8", errors="replace")) > MAX_FLOW_BYTES:
         raise FlowError(f"the flow is larger than {MAX_FLOW_BYTES // 1024} KB")
     try:
-        data = yaml.safe_load(text)
+        data = plainyaml.load(text)             # refuses aliases: a tiny text must not unfold into gigabytes
     except yaml.YAMLError as e:
         mark = getattr(e, "problem_mark", None)
         at = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""

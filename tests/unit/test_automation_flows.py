@@ -188,6 +188,36 @@ def test_yaml_is_loaded_safely():
         flow("steps: [{tap: !!python/object/apply:os.system ['true']}]")
 
 
+def nested_aliases(levels: int, use: str) -> str:
+    """A text whose aliases unfold to 10**levels items when something walks or prints them."""
+    lines = ["overlays:", "  - &a0 [x, x, x, x, x, x, x, x, x, x]"]
+    lines += [f"  - &a{n} [" + ", ".join([f"*a{n - 1}"] * 10) + "]" for n in range(1, levels)]
+    return "\n".join([*lines, f"{use}: *a{levels - 1}", "steps: [{home: }]"]) + "\n"
+
+
+@pytest.mark.parametrize("use", ["description", "name", "package"])
+def test_a_flow_with_aliases_is_refused_before_anything_is_unfolded(use):
+    # Five levels are harmless (a few MB) and are still refused: the refusal is about the
+    # alias, not about a size, so nine levels (gigabytes) are refused just as quickly.
+    for levels in (5, 9):
+        started = time.monotonic()
+        with pytest.raises(FlowError, match="aliases .* are not supported"):
+            flow(nested_aliases(levels, use))
+        assert time.monotonic() - started < 1
+    with pytest.raises(FlowError, match="not valid YAML at line 2"):
+        flow("base: &tap {id: a}\nsteps: [{tap: *tap}]")
+    assert flow("steps: [{tap: {text: 'R&D *new*'}}]").steps          # the characters alone are fine
+
+
+def test_a_profile_file_with_aliases_is_refused_not_unfolded(tmp_path):
+    profiles = Profiles(tmp_path)
+    profiles.add_never_tap(PACKAGE, {"text": "Delete account"})
+    assert profiles.load(PACKAGE).never_tap                           # what the farm writes still loads
+    (tmp_path / f"{PACKAGE}.yaml").write_text(nested_aliases(5, "roles").replace("steps: [{home: }]", ""))
+    with pytest.raises(ValueError, match=f"the profile of {PACKAGE} is not valid .*aliases"):
+        profiles.load(PACKAGE)
+
+
 # ------------------------------------------------------------------- library
 @pytest.fixture
 def library(tmp_path) -> FlowLibrary:

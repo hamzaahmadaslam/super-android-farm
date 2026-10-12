@@ -9,6 +9,7 @@ Android in its InstanceSpec (see superfarm.core.models).
 """
 from __future__ import annotations
 
+import ipaddress
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,21 +33,42 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
+def _is_loopback(address: str) -> bool:
+    if address == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(address).is_loopback
+    except ValueError:
+        return False              # a name: where it points is not known here
+
+
 class ServerConfig(_Model):
-    host: str = Field("127.0.0.1", description="Address the panel and API listen on. Keep 127.0.0.1 unless you put TLS in front; anything else exposes farm control to the network.")
+    host: str = Field("127.0.0.1", description="Address the panel and API listen on. Keep 127.0.0.1 unless you put TLS in front; anything else exposes farm control to the network. The API token is equivalent to root on this machine (the daemon controls Docker, and Androids are privileged containers): treat it like a root password.")
     port: int = Field(7700, ge=1, le=65535, description="Port of the panel and API.")
-    auth_required: bool = Field(True, description="Require the API token for every request. Turning this off is refused when host is not a loopback address.")
+    auth_required: bool = Field(True, description="Require the API token for every request. Turning this off is refused when host is not a loopback address; a daemon that is listening on another address keeps asking for the token until it is restarted on loopback.")
     tls_cert: str = Field("", description="PEM certificate file. With tls_key, the server speaks HTTPS.")
     tls_key: str = Field("", description="PEM private key file for tls_cert.")
     session_hours: int = Field(12, ge=1, le=720, description="How long a browser login stays valid.")
     max_upload_mb: int = Field(4096, ge=1, description="Largest file (APK, video) the panel accepts.")
     allowed_origins: list[str] = Field(default_factory=list, description="Extra browser origins allowed to call the API (CORS). Empty = same origin only.")
-    audit_log: bool = Field(True, description="Record every state-changing request (who, what, when) in logs/audit.log.")
-    login_attempts_per_minute: int = Field(10, ge=1, description="Failed logins allowed per client address per minute before a temporary lockout.")
+    audit_log: bool = Field(True, description="Record every state-changing request (who, what, when) in logs/audit.log. Requests nobody authenticated (refused logins, wrong tokens) go to logs/audit-anonymous.log, so they cannot push the real history out.")
+    login_attempts_per_minute: int = Field(10, ge=1, description="Wrong tokens allowed per client address per minute; further wrong ones from that address are refused for a minute. The right token is always accepted.")
+    trusted_proxies: list[str] = Field(default_factory=list, description="Addresses or networks (e.g. 127.0.0.1, 10.0.0.0/8) of reverse proxies whose X-Forwarded-For and X-Forwarded-Proto headers are believed. Empty = none: the recorded client is always the peer that connected. A proxy listed here must set both headers itself.")
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _proxy_addresses(cls, v: list[str]) -> list[str]:
+        for entry in v:
+            try:
+                ipaddress.ip_network(entry, strict=False)
+            except ValueError:
+                # No names and no "*": whoever is trusted here chooses the address that is rate-limited and audited.
+                raise ValueError(f"server.trusted_proxies: {entry!r} is not an IP address or network") from None
+        return v
 
 
 class DockerConfig(_Model):
-    binary: str = Field("docker", description="Docker CLI to use.")
+    binary: str = Field("docker", description="Docker CLI to use. The daemon runs this program: it is set in config.yaml or with `sf config set`, and cannot be changed through the API.")
     name_prefix: str = Field("sf", pattern=r"^[a-z][a-z0-9]{0,11}$", description="Prefix of every container, volume and network this farm creates. Two farms on one machine need different prefixes.")
     stop_timeout: int = Field(10, ge=0, le=300, description="Seconds an Android gets to shut down before it is killed.")
     subnet_pool: str = Field("10.213.0.0/16", description="Private range that shared-VPN gateway networks are carved from (one /24 each).")
@@ -95,9 +117,9 @@ class ResourcesConfig(_Model):
 
 class NvidiaConfig(_Model):
     runtime_dir: str = Field("", description="Folder holding the Venus runtime for Android (vulkan.virtio.so, gralloc.venus.so, gralloc.venus.x86.so, gpu_config.sh). Empty = <home>/overlays/venus.")
-    relay_dir: str = Field("", description="Install prefix of the patched virgl_test_server relay (contains bin/ and lib/). Empty = <home>/overlays/venus-relay.")
+    relay_dir: str = Field("", description="Install prefix of the patched virgl_test_server relay (contains bin/ and lib/). Empty = <home>/overlays/venus-relay. The daemon runs the relay from here: set in config.yaml or with `sf config set`, not through the API.")
     socket_dir: str = Field("/run/superfarm/venus", description="Where relay sockets live. One socket per NVIDIA card.")
-    icd: str = Field("/usr/share/vulkan/icd.d/nvidia_icd.json", description="Vulkan ICD manifest of the NVIDIA driver on the host.")
+    icd: str = Field("/usr/share/vulkan/icd.d/nvidia_icd.json", description="Vulkan ICD manifest of the NVIDIA driver on the host. It names the driver library the relay loads: set in config.yaml or with `sf config set`, not through the API.")
     debug: bool = Field(False, description="Verbose driver logging inside Android (mesa.log.level=debug). Costs CPU; leave off.")
 
 
@@ -148,9 +170,27 @@ class DeviceConfig(_Model):
     profile: str = Field("random", description="Device model an Android reports: a preset name (see `sf device profiles`), `random`, or `none` to keep the image's own identity.")
     randomize_android_id: bool = Field(True, description="Give each new Android its own random android_id.")
     locale: str = Field("en-US", description="System language.")
-    timezone: str = Field("", description="Time zone, e.g. Europe/Berlin. Empty = host's zone. `auto` = derive from the VPN exit address.")
-    geo: str = Field("", description="Mock location as `lat,lon`. Empty = none. `auto` = derive from the VPN exit address.")
+    timezone: str = Field("", description="Time zone as an Olson name, e.g. Europe/Berlin. Empty = the host's zone.")
+    geo: str = Field("", description="Mock location as `lat,lon`, e.g. `52.52,13.405`. Empty = none.")
     extra_props: dict[str, str] = Field(default_factory=dict, description="Extra build properties set at boot (ro.product.* and friends).")
+
+    # The checks below live with the code that applies these values to an Android, and that
+    # package builds on this module; hence the imports inside.
+    @field_validator("timezone")
+    @classmethod
+    def _zone(cls, v: str) -> str:
+        if v.strip():
+            from .core.device_profile import check_timezone
+            check_timezone(v.strip())
+        return v.strip()
+
+    @field_validator("geo")
+    @classmethod
+    def _position(cls, v: str) -> str:
+        if v.strip():
+            from .core.device_profile import parse_geo
+            parse_geo(v)
+        return v.strip()
 
 
 class ZramConfig(_Model):
@@ -199,9 +239,18 @@ class CameraConfig(_Model):
     fps: int = Field(20, ge=5, le=60, description="Frames per second of the camera feed.")
     quality: int = Field(5, ge=2, le=31, description="MJPEG quantiser; lower is better and larger.")
     mirror: bool = Field(True, description="Flip the picture horizontally. On by default: apps mirror a front camera, and in a live broadcast test viewers (and the broadcaster's preview) saw the source the right way round only with this on. Turn it off if text in your source appears reversed.")
-    rtmp_bind: str = Field("127.0.0.1", description="Address the RTMP ingest listens on for live sources (OBS).")
+    rtmp_bind: str = Field("127.0.0.1", description="Address the RTMP ingest listens on for live sources (OBS). The ingest has no authentication (the stream key is not checked): whatever can reach this address becomes the camera picture and microphone of the Androids. Keep 127.0.0.1; for OBS on another PC use an SSH tunnel. Another address is refused unless rtmp_allow_remote is on.")
+    rtmp_allow_remote: bool = Field(False, description="Accept an rtmp_bind that is not a loopback address. Only on a network where every machine is trusted: the ingest cannot tell your OBS from anyone else's.")
     rtmp_port: int = Field(1935, ge=1024, le=65535, description="Port the RTMP ingest listens on.")
     hal_overlay: str = Field("", description="Folder with the camera/microphone HAL files copied into /vendor. Empty = <home>/overlays/camera/<android version>.")
+
+    @model_validator(mode="after")
+    def _ingest(self) -> CameraConfig:
+        if not self.rtmp_allow_remote and not _is_loopback(self.rtmp_bind):
+            raise ValueError(f"media.camera.rtmp_bind {self.rtmp_bind!r} is not a loopback address and the RTMP ingest has "
+                             "no authentication: keep 127.0.0.1 (use an SSH tunnel for OBS on another PC), or set "
+                             "media.camera.rtmp_allow_remote to true on a network you trust")
+        return self
 
 
 class AudioConfig(_Model):
@@ -277,6 +326,93 @@ class LoggingConfig(_Model):
     keep: int = Field(5, ge=1, description="Rotated files kept.")
 
 
+class McpConfig(_Model):
+    enabled: bool = Field(True, description="Let MCP clients (desktop assistants, IDE agents) connect through `sf mcp`. Off: `sf mcp` refuses to start. It needs the farm's API token either way, so this is a switch for the operator, not a security boundary.")
+    http_port: int = Field(7711, ge=1024, le=65535, description="Port `sf mcp --http` listens on (loopback only, bearer token required) when no --port is given.")
+    elicitation: bool = Field(False, description="When an approval is needed and the MCP client can ask its user questions (MCP elicitation), also show the Yes/No there. Off by default: a client may answer such a question by itself without showing it to anyone, and the decision is meant to be a person's. The request is in the farm's own queue either way and the first answer counts.")
+
+
+class ModelProfile(_Model):
+    provider: Literal["ollama", "openai"] = Field(..., description="Wire format of the model server. ollama: an Ollama server's own API. openai: any server that speaks the OpenAI chat-completions API (most hosted services and local servers do).")
+    base_url: str = Field("http://127.0.0.1:11434", description="Address of the model server. For `openai`, with or without a trailing /v1.")
+    model: str = Field("", max_length=200, description="Model name as the server knows it. Empty = the first one the server lists.")
+    api_key_secret: str = Field("", pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$|^$", description="Name of the secret that holds the API key (a file in <home>/secrets, written with `sf ai models key <profile>`). Never the key itself. Empty = the server needs no key.")
+    tools: bool = Field(True, description="The model can call tools (function calling). The Assistant needs it. Off: the Pilot asks for plain JSON instead.")
+    vision: bool = Field(False, description="The model can read pictures. On: the Pilot also sends a downscaled screenshot with every step.")
+    timeout: int = Field(120, ge=5, le=1800, description="Seconds to wait for one answer.")
+    temperature: float | None = Field(0.1, ge=0, le=2, description="Sampling temperature. Low values keep answers repeatable. Leave it out (null) for a server that does not accept the setting.")
+    num_ctx: int = Field(16384, ge=1024, description="Context window in tokens requested from the model (ollama provider). The Assistant's tool list alone is about 6,500 tokens, so less than 12288 leaves it little room; the Pilot needs about 2,000 per step.")
+    max_tokens: int = Field(1024, ge=0, le=65536, description="Longest answer in tokens. 0 = do not send a limit.")
+    headers: dict[str, str] = Field(default_factory=dict, description="Extra HTTP headers sent with every request (a gateway's routing header, for example). Not for keys: those go in api_key_secret.")
+    extra: dict[str, Any] = Field(default_factory=dict, description="Extra fields added to every request body, for options a particular server needs (e.g. `think: false`, `keep_alive: 10m`).")
+
+
+class AssistantConfig(_Model):
+    max_steps: int = Field(12, ge=1, le=100, description="Model turns the Assistant may take to answer one message. It stops and says so when the limit is reached.")
+    max_tool_calls: int = Field(24, ge=1, le=500, description="Tool calls the Assistant may make to answer one message.")
+    max_seconds: int = Field(600, ge=10, le=7200, description="Wall-clock limit for answering one message. Time spent waiting for the operator's Yes or No does not count.")
+    max_result_chars: int = Field(6000, ge=500, le=100000, description="Longest tool result handed back to the model; longer ones are cut and marked as cut.")
+    keep_conversations: int = Field(20, ge=1, le=500, description="Conversations kept (in memory and as transcripts under <home>/automation/assistant). The oldest finished ones are removed first.")
+
+
+class PilotConfig(_Model):
+    max_parallel: int = Field(2, ge=1, le=64, description="Androids one Pilot session drives at the same time; the rest queue. Each one asks the model once per step, so this is also how many requests the model server sees at once.")
+    max_steps: int = Field(25, ge=1, le=200, description="Actions one Pilot run may take on one Android before it stops.")
+    max_minutes: float = Field(10, gt=0, le=240, description="Wall-clock limit for one Pilot run on one Android.")
+    max_model_calls: int = Field(60, ge=1, le=1000, description="Model requests one Pilot run on one Android may make (rejected answers count too).")
+    max_no_progress: int = Field(3, ge=1, le=20, description="Actions in a row that lead to no new screen (nothing changes, or the run is back on a screen it has already seen) before the run stops.")
+    max_elements: int = Field(60, ge=10, le=200, description="Screen elements described to the model per step.")
+    reply: Literal["auto", "tools", "json"] = Field("auto", description="How the Pilot gets its one action per step from the model. json: one JSON object held to a schema by the server. tools: a tool call. auto: json on an `ollama` server (it enforces the schema, so even a small model cannot answer in the wrong form), tools elsewhere when the profile has `tools`, otherwise json.")
+    restart_app: bool = Field(True, description="Force-stop the app before each Pilot run, so every recording starts from the app's first screen.")
+    allowed_packages: list[str] = Field(default_factory=lambda: ["com.android.permissioncontroller", "com.google.android.permissioncontroller"], description="Packages a Pilot run may pass through besides the app it was started for (permission dialogs by default). Landing anywhere else ends the run.")
+
+
+class AiConfig(_Model):
+    policy: Literal["read-only", "ask", "allow"] = Field("ask", description="What AI assistants may do through the farm's tools. read-only: look, never change anything. ask: actions that change the farm wait for the operator's Yes or No (see ask_for). allow: every tool that is not denied runs without asking.")
+    ask_for: list[Literal["change", "destructive"]] = Field(default_factory=lambda: ["change", "destructive"], description="Under policy `ask`: which kinds of action need the operator's approval. change: start, stop, install, tap, type and the like. destructive: delete, uninstall, clear data, restore, shell. Remove `change` to be asked only before destructive actions.")
+    approval_timeout_seconds: int = Field(300, ge=5, le=3600, description="How long an approval request waits for the operator. After that it expires and the assistant is told that nobody answered; nothing runs.")
+    auto_approve: list[str] = Field(default_factory=list, description="Tool names that never need approval under policy `ask` (e.g. `tap`, `type_text`). `sf mcp tools` lists the names.")
+    deny: list[str] = Field(default_factory=lambda: ["run_shell"], description="Tool names AI assistants can never use, whatever the policy. `sf mcp tools` lists the names.")
+    max_screenshot_px: int = Field(768, ge=128, le=2048, description="Longest side, in pixels, of a screenshot handed to an assistant. Larger pictures cost the model more and rarely help.")
+    mcp: McpConfig = Field(default_factory=McpConfig)
+    models: dict[str, ModelProfile] = Field(default_factory=dict, description="Named model profiles the Assistant and the Pilot can use: profile name -> where the model lives and what it can do. `automation` is reserved for the model set under automation.llm.")
+    default_model: str = Field("", max_length=32, description="Profile used when none is named. Empty = the only profile there is.")
+    assistant: AssistantConfig = Field(default_factory=AssistantConfig)
+    pilot: PilotConfig = Field(default_factory=PilotConfig)
+
+    @field_validator("ask_for")
+    @classmethod
+    def _always_destructive(cls, v: list[str]) -> list[str]:
+        # "ask" that lets a deletion through unasked would not mean what it says. One tool can
+        # still be pre-approved by name (auto_approve), which is a visible, deliberate choice.
+        if "destructive" not in v:
+            raise ValueError("ask_for must include `destructive`; to run one destructive tool without asking, "
+                             "name it in ai.auto_approve, or set ai.policy to allow")
+        return [k for k in ("change", "destructive") if k in v]
+
+    @field_validator("models")
+    @classmethod
+    def _profile_names(cls, v: dict[str, ModelProfile]) -> dict[str, ModelProfile]:
+        import re
+        for name in v:
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name):
+                raise ValueError(f"bad model profile name {name!r}: use lower-case letters, digits, - and _")
+            if name == "automation":
+                raise ValueError("the profile name `automation` is taken by the model set under automation.llm")
+        return v
+
+    @field_validator("auto_approve", "deny")
+    @classmethod
+    def _tool_names(cls, v: list[str]) -> list[str]:
+        # A misspelt name in `deny` would silently leave that tool available: refuse it here.
+        # Imported inside: the tool registry builds on this module.
+        from .ai.tools import TOOL_NAMES
+        unknown = sorted(set(v) - set(TOOL_NAMES))
+        if unknown:
+            raise ValueError(f"unknown tool name(s): {', '.join(unknown)} (see `sf mcp tools`)")
+        return sorted(set(v))
+
+
 class Config(_Model):
     version: int = Field(1, description="Config format version.")
     farm_name: str = Field("Super Farm", max_length=60, description="Name shown in the panel.")
@@ -294,6 +430,7 @@ class Config(_Model):
     backup: BackupConfig = Field(default_factory=BackupConfig)
     control: ControlConfig = Field(default_factory=ControlConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    ai: AiConfig = Field(default_factory=AiConfig)
 
     @model_validator(mode="after")
     def _safety(self) -> Config:
@@ -318,23 +455,73 @@ def _deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
-def _prune_defaults(value: Any, default: Any) -> Any:
-    """Drop everything equal to the default so config.yaml only shows what was changed."""
-    if isinstance(value, dict) and isinstance(default, dict):
-        out = {k: _prune_defaults(v, default.get(k)) for k, v in value.items()}
-        return {k: v for k, v in out.items() if v is not None and v != {} or (k not in default)} or None
-    return None if value == default else value
+def _changed(model: BaseModel, default: BaseModel) -> dict:
+    """What differs from the defaults, so config.yaml only shows what was changed.
+
+    Only settings *sections* (nested models) are compared field by field. A free-form
+    map such as android.images or network.gateways is written whole as soon as anything
+    in it differs: writing just the changed field of one entry produced a file that would
+    not load again, because a map in the file replaces the default map entirely.
+    """
+    out: dict = {}
+    for name in type(model).model_fields:
+        value, base = getattr(model, name), getattr(default, name)
+        if isinstance(value, BaseModel) and isinstance(base, BaseModel) and type(value) is type(base):
+            inner = _changed(value, base)
+            if inner:
+                out[name] = inner
+        elif value != base:
+            out[name] = model.model_dump(mode="json", include={name})[name]
+    return out
 
 
 def load_config(paths: Paths | None = None) -> Config:
     paths = paths or get_paths()
-    return Config.model_validate(read_yaml(paths.config, {}) or {})
+    data = read_yaml(paths.config, {}) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{paths.config}: expected a mapping of sections, got {type(data).__name__}")
+    return Config.model_validate(data)
 
 
 def save_config(config: Config, paths: Paths | None = None) -> Path:
     paths = paths or get_paths()
-    changed = _prune_defaults(config.model_dump(mode="json"), Config().model_dump(mode="json")) or {}
+    changed = _changed(config, Config())
     return write_yaml(paths.config, changed, mode=0o640)
+
+
+# Settings that name a program the daemon starts on the host, or code that program loads.
+# Whoever may change one runs anything as the daemon's user, so they are changed where a
+# person with a shell on the machine changes things (config.yaml, `sf config set`) and never
+# through the HTTP API.
+API_IMMUTABLE_KEYS = ("docker.binary", "gpu.nvidia.relay_dir", "gpu.nvidia.icd")
+
+
+def _after_patch(patch: dict, dotted: str, current: Any, default: Any) -> Any:
+    """The value of one dotted key once a merge patch is applied."""
+    node: Any = patch
+    for part in dotted.split("."):
+        if not isinstance(node, dict):
+            return node               # a value where a section belongs: not valid, and not the current value
+        if part not in node:
+            return current            # the patch does not reach this key
+        node = node[part]
+        if node is None:
+            return default            # null removes the key, or the section holding it
+    return node
+
+
+def check_api_patch(config: Config, patch: Any) -> None:
+    """Refuse a settings patch (JSON merge patch, as PATCH /api/config takes it) that would
+    change one of API_IMMUTABLE_KEYS. Raises ValueError naming the keys; a patch that repeats
+    the current value passes, so a form may send back everything it shows."""
+    if not isinstance(patch, dict):
+        raise ValueError("a config patch is a mapping of sections to new values")
+    defaults = Config()
+    refused = [dotted for dotted in API_IMMUTABLE_KEYS
+               if _after_patch(patch, dotted, get_value(config, dotted), get_value(defaults, dotted)) != get_value(config, dotted)]
+    if refused:
+        raise ValueError(f"{', '.join(refused)} cannot be changed through the API: it decides which program the "
+                         "daemon runs. Change it in config.yaml or with `sf config set`, then restart the daemon")
 
 
 def get_value(config: Config, dotted: str) -> Any:

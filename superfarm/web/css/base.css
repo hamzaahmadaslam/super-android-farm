@@ -1,109 +1,58 @@
-/* Tokens, reset and typography. Colours live in custom properties so the two themes
-   differ in one place; the theme follows the system unless the operator picked one. */
-
-:root {
-  --bg: #f5f6f8;
-  --surface: #ffffff;
-  --surface-2: #eef0f3;
-  --border: #d5d9e0;
-  --text: #1b2330;
-  --muted: #5d6878;
-  --accent: #0f766e;
-  --accent-text: #ffffff;
-  --accent-soft: #d6efec;
-  --ok: #18794e;
-  --ok-soft: #ddf3e4;
-  --warn: #9a6200;
-  --warn-soft: #fdf0cf;
-  --fail: #c62a2f;
-  --fail-soft: #fde4e4;
-  --info: #1d5fbf;
-  --info-soft: #e0ebfb;
-  --focus: #2563eb;
-  --shadow: 0 1px 2px rgb(0 0 0 / 8%), 0 4px 16px rgb(0 0 0 / 8%);
-  --radius: 6px;
-  --gap: 12px;
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #12151a;
-    --surface: #1a1e25;
-    --surface-2: #232830;
-    --border: #343b46;
-    --text: #e3e7ee;
-    --muted: #98a2b3;
-    --accent: #2bb3a6;
-    --accent-text: #06201d;
-    --accent-soft: #143b38;
-    --ok: #4cc38a;
-    --ok-soft: #153226;
-    --warn: #f1b434;
-    --warn-soft: #3a2e10;
-    --fail: #ff7b7f;
-    --fail-soft: #41191b;
-    --info: #74a8ff;
-    --info-soft: #16294a;
-    --focus: #8ab4ff;
-    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 20px rgb(0 0 0 / 40%);
-    color-scheme: dark;
-  }
-}
-
-:root[data-theme="dark"] {
-  --bg: #12151a;
-  --surface: #1a1e25;
-  --surface-2: #232830;
-  --border: #343b46;
-  --text: #e3e7ee;
-  --muted: #98a2b3;
-  --accent: #2bb3a6;
-  --accent-text: #06201d;
-  --accent-soft: #143b38;
-  --ok: #4cc38a;
-  --ok-soft: #153226;
-  --warn: #f1b434;
-  --warn-soft: #3a2e10;
-  --fail: #ff7b7f;
-  --fail-soft: #41191b;
-  --info: #74a8ff;
-  --info-soft: #16294a;
-  --focus: #8ab4ff;
-  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 20px rgb(0 0 0 / 40%);
-  color-scheme: dark;
-}
+/* Reset, typography and small utilities. Colours and sizes come from tokens.css. */
 
 *, *::before, *::after { box-sizing: border-box; }
 
-html { font-size: 14px; }
+html { font-size: 14px; scrollbar-color: var(--border-strong) transparent; }
 
 body {
   margin: 0;
-  background: var(--bg);
+  min-height: 100vh;
+  background-color: var(--bg);
+  /* Two faint lights behind the page give the translucent surfaces something to sit on. */
+  background-image:
+    radial-gradient(900px 520px at 12% -8%, var(--bg-tint-a), transparent 70%),
+    radial-gradient(900px 560px at 96% -12%, var(--bg-tint-b), transparent 70%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
   color: var(--text);
   font-family: var(--font);
-  line-height: 1.45;
+  line-height: 1.5;
+  /* Paths and package names have no spaces: break them rather than widen the page. */
+  overflow-wrap: break-word;
   -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 h1, h2, h3, h4, p, ul, ol, dl, dd, figure, pre { margin: 0; }
-h1 { font-size: 1.35rem; font-weight: 600; }
-h2 { font-size: 1.05rem; font-weight: 600; }
-h3 { font-size: .95rem; font-weight: 600; }
+h1 { font-size: 1.55rem; font-weight: 650; line-height: 1.2; letter-spacing: -.015em; }
+h2 { font-size: 1.02rem; font-weight: 620; line-height: 1.3; letter-spacing: -.005em; }
+h3 { font-size: .93rem; font-weight: 620; line-height: 1.3; }
 ul, ol { padding-left: 1.3em; }
-a { color: var(--accent); }
-img, canvas { max-width: 100%; }
+a { color: var(--accent); text-underline-offset: 2px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+img, canvas, svg { max-width: 100%; }
 code, pre, kbd, .mono { font-family: var(--mono); font-size: .92em; }
-code { background: var(--surface-2); padding: 1px 4px; border-radius: 4px; }
+code { background: var(--surface-2); border: 1px solid var(--border); padding: 0 5px; border-radius: 5px; overflow-wrap: anywhere; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 1.7em; padding: 1px 6px;
+  color: var(--muted); background: var(--surface-2);
+  border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 5px;
+  font-size: .82rem; line-height: 1.4; white-space: nowrap;
+}
+strong { font-weight: 620; }
 [hidden] { display: none !important; }
+::selection { background: var(--accent-soft); }
 
-/* One focus style everywhere; never removed, only shown for keyboard use. */
-:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* One focus ring everywhere; never removed, only shown for keyboard use. */
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--r-sm); }
 :focus:not(:focus-visible) { outline: none; }
+
+.icon { width: 16px; height: 16px; flex: none; display: inline-block; vertical-align: -3px; }
+.icon.lg { width: 20px; height: 20px; }
+.icon.xl { width: 28px; height: 28px; }
 
 .muted { color: var(--muted); }
 .small { font-size: .88rem; }
@@ -112,17 +61,43 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }
 .fail { color: var(--fail); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.eyebrow { color: var(--muted); font-size: .76rem; font-weight: 620; letter-spacing: .08em; text-transform: uppercase; }
+.gradient-text {
+  color: var(--accent);
+  background: linear-gradient(120deg, var(--accent-a), var(--accent-b));
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+@media (forced-colors: active) { .gradient-text { -webkit-text-fill-color: currentColor; background: none; } }
 
 .visually-hidden {
   position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
 }
 
-.skip-link { position: absolute; left: 8px; top: -48px; z-index: 100; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
-.skip-link:focus { top: 8px; }
+.skip-link {
+  position: absolute; left: var(--s-2); top: -64px; z-index: 100; padding: var(--s-2) var(--s-3);
+  color: var(--text); background: var(--surface-solid); border: 1px solid var(--border-strong); border-radius: var(--r-md);
+}
+.skip-link:focus { top: var(--s-2); }
 
-.noscript { margin: 40px auto; max-width: 480px; padding: 16px; }
+.noscript { margin: 40px auto; max-width: 480px; padding: var(--s-4); }
 
+@keyframes sf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes sf-spin { to { transform: rotate(360deg); } }
+@keyframes sf-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes sf-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes sf-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sf-slide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+.spin { animation: sf-spin .9s linear infinite; }
+.pulse { animation: sf-pulse 1.4s ease-in-out infinite; }
+
+/* Motion is decoration here, never information: with reduced motion everything is still. */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
 }

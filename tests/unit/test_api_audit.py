@@ -57,17 +57,19 @@ def test_refusals_and_failures_are_recorded_too(a):
     a.client.delete("/api/instances/7")
     a.client.post("/api/instances", json={"count": 1}, headers={"Origin": "http://evil.example"})
     got = [(e["path"], e["status"], e["outcome"], e["auth"]) for e in a.audit_lines()]
-    assert got == [("/api/instances", 401, "denied", "anonymous"), ("/api/auth/login", 401, "denied", "anonymous"),
-                   ("/api/instances", 422, "error", "token"), ("/api/instances/7", 404, "error", "token"),
+    assert got == [("/api/instances", 422, "error", "token"), ("/api/instances/7", 404, "error", "token"),
                    ("/api/instances", 403, "denied", "token")]
+    # What nobody authenticated is kept apart, so it cannot rotate the lines above away.
+    got = [(e["path"], e["status"], e["outcome"], e["auth"]) for e in a.audit_lines("audit-anonymous.log")]
+    assert got == [("/api/instances", 401, "denied", "anonymous"), ("/api/auth/login", 401, "denied", "anonymous")]
 
 
 def test_a_session_without_csrf_is_recorded_as_denied(a):
     client = TestClient(a.app, base_url=BASE, raise_server_exceptions=False)
     client.post("/api/auth/login", json={"token": a.token})
     client.post("/api/instances", json={"count": 1})
-    login, refused = a.audit_lines()
-    assert (login["path"], login["status"], login["outcome"]) == ("/api/auth/login", 200, "ok")
+    login, refused = a.audit_lines()               # a login that succeeded is authenticated history
+    assert (login["path"], login["status"], login["outcome"], login["auth"]) == ("/api/auth/login", 200, "ok", "token")
     assert (refused["status"], refused["outcome"], refused["auth"]) == (403, "denied", "session")
 
 
@@ -91,7 +93,7 @@ def test_bodies_tokens_and_query_strings_are_never_written(a):
     a.client.delete("/api/instances/1", params={"keep_data": "true", "note": SECRET})
     a.client.post("/api/apps/library", params={"filename": SECRET + ".apk"}, content=b"not an apk")
     a.anonymous.get("/api/instances", headers={"Authorization": f"Bearer {SECRET}"})
-    text = (a.farm.paths.logs / "audit.log").read_text()
+    text = (a.farm.paths.logs / "audit.log").read_text() + (a.farm.paths.logs / "audit-anonymous.log").read_text()
     assert len(text.splitlines()) == 12
     assert SECRET not in text and a.token not in text
     assert "keep_data" not in text and "?" not in text
@@ -151,3 +153,53 @@ def test_note_keeps_only_known_short_facts():
                                             (403, "denied"), (404, "error"), (409, "error"), (429, "denied"), (500, "error")])
 def test_outcome_of(status, outcome):
     assert outcome_of(status) == outcome
+
+
+# ----------------------------------------------------- what nobody authenticated
+
+def test_the_recorded_path_is_capped(a):
+    a.anonymous.post("/api/" + "A" * 60_000)
+    a.client.post("/api/instances/" + "9" * 60_000 + "/start")
+    (junk,), (known,) = a.audit_lines("audit-anonymous.log"), a.audit_lines()
+    assert (junk["status"], known["status"], known["auth"]) == (404, 400, "token")
+    assert len(junk["path"]) == len(known["path"]) == 200 and known["path"].startswith("/api/instances/999")
+
+
+def test_unauthenticated_requests_cannot_rotate_out_the_authenticated_history(a):
+    for log in (a.app.state.audit, a.app.state.audit_anonymous):
+        log.configure(max_bytes=2000, keep=1, enabled=True)
+    a.client.post("/api/instances", json={"count": 1})                       # the line worth keeping
+    for n in range(100):
+        a.anonymous.post(f"/api/junk/{n}")                                   # 404, no credentials
+        a.anonymous.post("/api/auth/login", json={"token": "guess"})         # 401 / 429, no credentials
+        a.anonymous.post("/api/instances", headers={"Authorization": "Bearer guess"})
+    logs = a.farm.paths.logs
+    assert [(e["path"], e["auth"], e["ids"]) for e in a.audit_lines()] == [("/api/instances", "token", [1])]
+    assert not (logs / "audit.log.1").exists()
+    # The junk has a budget of its own: bounded, owner-only, and still says who and what.
+    files = sorted(p.name for p in logs.iterdir() if p.name.startswith("audit-anonymous"))
+    assert files == ["audit-anonymous.log", "audit-anonymous.log.1"]
+    assert all((logs / f).stat().st_size <= 2000 and stat.S_IMODE((logs / f).stat().st_mode) == 0o600 for f in files)
+    last = a.audit_lines("audit-anonymous.log")[-1]
+    assert last["auth"] == "anonymous" and last["client"] == "testclient" and last["outcome"] == "denied"
+
+
+def test_the_anonymous_log_follows_the_same_settings(a):
+    a.client.patch("/api/config", json={"patch": {"logging": {"max_mb": 1, "keep": 2}}})
+    other = a.app.state.audit_anonymous
+    assert (other._max_bytes, other._keep, other.enabled) == (1024 * 1024, 2, True)
+    a.client.patch("/api/config", json={"patch": {"server": {"audit_log": False}}})
+    a.anonymous.post("/api/instances", json={"count": 1})
+    assert other.enabled is False and a.audit_lines("audit-anonymous.log") == []
+
+
+def test_switching_the_audit_log_off_is_the_last_thing_it_records(a, caplog):
+    assert a.client.post("/api/instances", json={"count": 1}).status_code == 201
+    with caplog.at_level("WARNING", logger="superfarm.api"):
+        assert a.client.patch("/api/config", json={"patch": {"server": {"audit_log": False}}}).status_code == 200
+    assert a.client.delete("/api/instances/1", params={"force": "true"}).status_code == 200
+    created, switched = a.audit_lines()
+    assert (created["method"], created["path"]) == ("POST", "/api/instances")
+    assert (switched["method"], switched["path"], switched["status"]) == ("PATCH", "/api/config", 200)
+    assert switched["keys"] == ["server.audit_log"] and switched["auth"] == "token"
+    assert any("audit log" in r.getMessage() and "testclient" in r.getMessage() for r in caplog.records)

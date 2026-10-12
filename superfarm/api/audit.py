@@ -8,7 +8,15 @@ What is recorded is who, what and how it ended. Request bodies and query strings
 written: they are where passwords, tokens and typed text travel. A route adds the few facts
 worth keeping (which Androids, which task) with note().
 
-The file is logs/audit.log, owner-only, rotated by size (logging.max_mb, logging.keep).
+Two files, each owner-only and rotated by size (logging.max_mb, logging.keep):
+
+    logs/audit.log             requests from an authenticated caller
+    logs/audit-anonymous.log   requests nobody authenticated: refused logins, wrong tokens,
+                               junk. Anyone who can reach the port can write these lines, so
+                               they have a size budget of their own and can never push the
+                               authenticated history out of its files.
+
+The path is cut at 200 characters: it is the one field a caller chooses the length of.
 """
 from __future__ import annotations
 
@@ -31,6 +39,8 @@ log = logging.getLogger("superfarm.api")
 # Facts a route may attach. Anything else is dropped, so a careless note() cannot leak a body.
 NOTE_KEYS = ("selector", "ids", "task", "name", "action", "archive", "package", "app", "count", "keys", "force")
 _MAX_IDS = 200
+MAX_PATH = 200
+ANONYMOUS_LOG = "audit-anonymous.log"
 
 
 class _OwnerOnlyHandler(RotatingFileHandler):
@@ -62,8 +72,9 @@ class AuditLog:
                 self._handler = None
             self._max_bytes, self._keep, self.enabled = int(max_bytes), int(keep), enabled
 
-    def write(self, entry: dict[str, Any]) -> None:
-        if not self.enabled:
+    def write(self, entry: dict[str, Any], *, force: bool = False) -> None:
+        """`force` writes although the log is off: for the request that switched it off."""
+        if not (self.enabled or force):
             return
         line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"), default=str)
         try:
@@ -107,14 +118,15 @@ def outcome_of(status: int) -> str:
 class AuditMiddleware:
     """Pure ASGI: sees the final status of every state-changing HTTP request."""
 
-    def __init__(self, app, audit: AuditLog):
-        self.app, self.audit = app, audit
+    def __init__(self, app, audit: AuditLog, anonymous: AuditLog):
+        self.app, self.audit, self.anonymous = app, audit, anonymous
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] in SAFE_METHODS or not scope["path"].startswith("/api/"):
             await self.app(scope, receive, send)
             return
         began = time.monotonic()
+        was_on = self.audit.enabled     # decided now: the request that turns the log off is still recorded
         status = 500        # what the caller gets when the app raises before answering
         state = scope.setdefault("state", {})
 
@@ -133,8 +145,8 @@ class AuditMiddleware:
                 "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "client": client[0] if client else "unknown",
                 "auth": getattr(identity, "method", "anonymous"),
-                "method": scope["method"], "path": scope["path"], "status": status,
+                "method": scope["method"], "path": scope["path"][:MAX_PATH], "status": status,
                 "outcome": outcome_of(status), "ms": int((time.monotonic() - began) * 1000),
                 **state.get("audit", {}),
             }
-            self.audit.write(entry)
+            (self.anonymous if identity is None else self.audit).write(entry, force=was_on)

@@ -3,20 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark light">
 <title>Super Farm</title>
 <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/tokens.css">
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/layout.css">
 <link rel="stylesheet" href="css/components.css">
+<link rel="stylesheet" href="css/pages.css">
 <script type="module" src="js/main.js"></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 
 <div id="login" class="login" hidden>
-  <form id="login-form" class="login-card" autocomplete="off">
-    <img src="img/logo.svg" alt="" width="40" height="40">
+  <form id="login-form" class="login-card glass" autocomplete="off">
+    <img src="img/logo.svg" alt="" width="48" height="48">
     <h1 id="login-title">Super Farm</h1>
     <p class="muted">Sign in with the API token of this farm. Run <code class="nowrap">sf token</code> on the machine that hosts it to see the token.</p>
     <label for="login-token">API token</label>
@@ -27,29 +29,64 @@
 </div>
 
 <div id="app" class="app" hidden>
-  <header class="topbar">
-    <button type="button" id="nav-toggle" class="btn ghost nav-toggle" aria-controls="nav" aria-expanded="false">Menu</button>
-    <a class="brand" href="#/dashboard"><img src="img/logo.svg" alt="" width="22" height="22"><span id="farm-name">Super Farm</span></a>
-    <a id="capacity-pill" class="pill" href="#/system" hidden></a>
+  <aside id="sidebar" class="sidebar glass">
+    <div class="sidebar-head">
+      <a class="brand" href="#/dashboard" aria-label="Super Farm, dashboard"><img src="img/logo.svg" alt="" width="28" height="28"><span class="brand-name">Super Farm</span></a>
+    </div>
+    <nav id="nav" class="nav" aria-label="Sections">
+      <div class="nav-group" role="group" aria-labelledby="nav-overview">
+        <span class="nav-title" id="nav-overview">Overview</span>
+        <a href="#/dashboard" data-icon="dashboard" data-key="d"><span class="nav-label">Dashboard</span></a>
+      </div>
+      <div class="nav-group" role="group" aria-labelledby="nav-fleet">
+        <span class="nav-title" id="nav-fleet">Fleet</span>
+        <a href="#/androids" data-icon="devices" data-key="a"><span class="nav-label">Androids</span></a>
+        <a href="#/control" data-icon="control" data-key="c"><span class="nav-label">Control</span></a>
+        <a href="#/apps" data-icon="apps" data-key="p"><span class="nav-label">Apps</span></a>
+      </div>
+      <div class="nav-group" role="group" aria-labelledby="nav-operate">
+        <span class="nav-title" id="nav-operate">Operate</span>
+        <a href="#/automation" data-icon="automation" data-key="u"><span class="nav-label">Automation</span></a>
+        <a href="#/network" data-icon="network" data-key="n"><span class="nav-label">Network</span></a>
+        <a href="#/media" data-icon="media" data-key="m"><span class="nav-label">Media</span></a>
+        <a href="#/backups" data-icon="backups" data-key="b"><span class="nav-label">Backups</span></a>
+      </div>
+      <div class="nav-group" role="group" aria-labelledby="nav-ai">
+        <span class="nav-title" id="nav-ai">AI</span>
+        <a href="#/approvals" data-icon="approval" data-key="i"><span class="nav-label">Approvals</span><span id="nav-approvals" class="nav-count" hidden></span></a>
+        <a href="#/access" data-icon="plug" data-key="x"><span class="nav-label">AI access</span></a>
+      </div>
+      <div class="nav-group" role="group" aria-labelledby="nav-host">
+        <span class="nav-title" id="nav-host">Host</span>
+        <a href="#/system" data-icon="system" data-key="s"><span class="nav-label">System</span></a>
+        <a href="#/settings" data-icon="settings" data-key="t"><span class="nav-label">Settings</span></a>
+      </div>
+    </nav>
+    <div class="sidebar-foot">
+      <button type="button" id="nav-collapse" class="btn ghost" aria-pressed="false" data-icon="collapse"><span class="btn-label">Collapse</span></button>
+    </div>
+  </aside>
+  <div id="nav-scrim" class="scrim" hidden></div>
+
+  <header class="topbar glass">
+    <button type="button" id="nav-toggle" class="btn ghost icon-only nav-toggle" aria-controls="sidebar" aria-expanded="false" aria-label="Menu" data-icon="menu"></button>
+    <div class="farm"><span id="link-dot" class="link-dot" role="img" aria-label="Connected to the farm daemon"></span><span id="farm-name" class="farm-name">Super Farm</span></div>
+    <button type="button" id="palette-open" class="search-trigger" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K /" data-icon="search"><span class="grow">Search or run a command</span><kbd id="palette-key">Ctrl K</kbd></button>
     <span class="spacer"></span>
-    <button type="button" id="tasks-button" class="btn ghost" aria-controls="tasks-drawer" aria-expanded="false">Tasks <span id="tasks-count" class="badge" hidden></span></button>
-    <button type="button" id="theme-toggle" class="btn ghost">Theme: auto</button>
-    <button type="button" id="logout" class="btn ghost">Sign out</button>
+    <a id="capacity-pill" class="counter" href="#/system" data-icon="devices" hidden><strong id="capacity-count" class="num"></strong><span class="counter-label">running</span></a>
+    <a id="approvals-link" class="btn ghost icon-only" href="#/approvals" aria-label="Approvals: nothing waiting" title="Approvals" data-icon="approval"><span id="approvals-count" class="count-dot pulse" hidden></span></a>
+    <button type="button" id="tasks-button" class="btn ghost icon-only" aria-controls="tasks-drawer" aria-expanded="false" aria-label="Tasks" title="Tasks" data-icon="tasks"><span id="tasks-count" class="count-dot pulse" hidden></span></button>
+    <button type="button" id="help-button" class="btn ghost icon-only" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" data-icon="keyboard"></button>
+    <button type="button" id="theme-toggle" class="btn ghost icon-only" aria-label="Theme"></button>
+    <button type="button" id="logout" class="btn ghost" data-icon="logout"><span class="btn-label">Sign out</span></button>
   </header>
-  <nav id="nav" class="nav" aria-label="Sections">
-    <a href="#/dashboard">Dashboard</a>
-    <a href="#/androids">Androids</a>
-    <a href="#/control">Control</a>
-    <a href="#/apps">Apps</a>
-    <a href="#/network">Network</a>
-    <a href="#/automation">Automation</a>
-    <a href="#/media">Media</a>
-    <a href="#/backups">Backups</a>
-    <a href="#/system">System</a>
-    <a href="#/settings">Settings</a>
-  </nav>
+  <div id="offline" class="notice" role="alert" hidden>
+    <strong>The farm daemon does not answer.</strong>
+    <span class="grow">What you see may be out of date and actions will fail. Check that <code class="nowrap">sf serve</code> is still running; the panel keeps trying and carries on by itself.</span>
+    <button type="button" id="offline-retry" class="btn small">Try now</button>
+  </div>
   <main id="main" class="main" tabindex="-1"></main>
-  <aside id="tasks-drawer" class="drawer" aria-label="Tasks" hidden></aside>
+  <aside id="tasks-drawer" class="drawer glass" aria-label="Tasks" hidden></aside>
 </div>
 
 <div id="toasts" class="toasts" role="status" aria-live="polite"></div>

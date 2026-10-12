@@ -13,6 +13,7 @@
 
 import { query, socketUrl } from '../api.js';
 import { h } from '../dom.js';
+import { icon } from '../icons.js';
 
 const TAP_SLOP = 0.02;          // movement below 2% of the picture is still a tap
 const LONG_PRESS_MS = 600;
@@ -28,6 +29,11 @@ export function thumbnails(scope, { fps = 1, width = 240 } = {}) {
     for (const img of visible) {
       // Never queue a second request behind a slow one: a busy device just updates less often.
       if (img.dataset.loading || !img.isConnected) continue;
+      // A device that is being stopped or restarted from here has no picture to give, and
+      // one that just failed to give a frame is left alone for a few seconds.
+      if (Number(img.dataset.retryAt || 0) > Date.now()) continue;
+      const card = img.closest('[data-thumb-owner]');
+      if (card && card.querySelector('.is-busy')) continue;
       img.dataset.loading = '1';
       img.src = `/api/instances/${img.dataset.id}/frame.jpg${query({ width, t: Date.now() })}`;
     }
@@ -40,7 +46,7 @@ export function thumbnails(scope, { fps = 1, width = 240 } = {}) {
       const img = h('img', { class: 'thumb', alt, dataset: { id: String(id) }, decoding: 'async' });
       const done = () => { delete img.dataset.loading; };
       img.addEventListener('load', done);
-      img.addEventListener('error', done);
+      img.addEventListener('error', () => { done(); img.dataset.retryAt = String(Date.now() + 5000); });
       observer.observe(img);
       return img;
     },
@@ -126,7 +132,21 @@ const KEYS = {
   Home: 'MOVE_HOME', End: 'MOVE_END', PageUp: 'PAGE_UP', PageDown: 'PAGE_DOWN',
 };
 let h264Failed = false;
-const NAV = [['Back', 'BACK'], ['Home', 'HOME'], ['Recents', 'APP_SWITCH'], ['Vol −', 'VOLUME_DOWN'], ['Vol +', 'VOLUME_UP'], ['Power', 'POWER']];
+// [label, Android key name, icon]. The first three are the navigation bar.
+export const DEVICE_KEYS = [
+  ['Back', 'BACK', 'back'], ['Home', 'HOME', 'home'], ['Recents', 'APP_SWITCH', 'recents'],
+  ['Volume down', 'VOLUME_DOWN', 'volume-down'], ['Volume up', 'VOLUME_UP', 'volume-up'], ['Power', 'POWER', 'power'],
+];
+
+// The device buttons as a group of icon buttons. `press(name)` sends one key.
+export function deviceKeys(press, { label = 'Device buttons', small = false, extra } = {}) {
+  return h('div', { class: 'live-keys', role: 'group', 'aria-label': label },
+    DEVICE_KEYS.map(([text, name, picture], index) => [
+      index === 3 ? h('span', { class: 'sep', 'aria-hidden': 'true' }) : null,
+      h('button', { type: 'button', class: `btn ghost icon-only ${small ? 'small' : ''}`, 'aria-label': text, title: text, onclick: () => press(name) }, icon(picture)),
+    ]),
+    extra ? [h('span', { class: 'sep', 'aria-hidden': 'true' }), extra] : null);
+}
 
 // options:
 //   send(kind, payload)  kind = tap | long-press | swipe | text | key, payload as the body of
@@ -134,9 +154,14 @@ const NAV = [['Back', 'BACK'], ['Home', 'HOME'], ['Recents', 'APP_SWITCH'], ['Vo
 //   h264                 offer the H.264 transport (the daemon's capability says so)
 //   fps, width           of the MJPEG stream
 //   aspect               [width, height] of the device screen, to reserve the space
-//   keys                 show the Back / Home / ... buttons (default true)
-export function liveView(id, scope, { send, h264 = false, fps = 8, width = 480, aspect, keys = true, label }) {
-  const note = h('span', { class: 'live-note' }, 'connecting');
+//   keys                 the Back / Home / ... buttons: true (under the picture, the
+//                        default), 'side' (a strip beside it) or false
+//   frame                draw the picture inside a device bezel
+//   extra                more controls for the end of the button strip
+export function liveView(id, scope, { send, h264 = false, fps = 8, width = 480, aspect, keys = true, label, frame = false, extra }) {
+  const note = h('span', { class: 'live-note' });
+  const say = (words, live = false) => { note.textContent = words; note.classList.toggle('on', live); };
+  say('connecting');
   const surface = h('div', {
     class: 'live-surface', tabindex: '0', role: 'application',
     'aria-label': `${label || `Android ${id}`} screen. Click or drag to touch it; type to send keys. Escape sends Back.`,
@@ -147,8 +172,8 @@ export function liveView(id, scope, { send, h264 = false, fps = 8, width = 480, 
 
   function startMjpeg() {
     const img = h('img', { alt: '', draggable: false });
-    img.addEventListener('load', () => { note.textContent = 'live'; surface.style.aspectRatio = ''; }, { once: true });
-    img.addEventListener('error', () => { note.textContent = 'no picture (is this Android running?)'; });
+    img.addEventListener('load', () => { say('live', true); surface.style.aspectRatio = ''; }, { once: true });
+    img.addEventListener('error', () => { say('no picture (is this Android running?)'); });
     img.src = `/api/instances/${id}/stream.mjpg${query({ fps, width })}`;
     show(img);
     // Clearing src is what ends the multipart request; removing the element alone does not.
@@ -166,7 +191,7 @@ export function liveView(id, scope, { send, h264 = false, fps = 8, width = 480, 
     if (h264 && !h264Failed && 'VideoDecoder' in window && 'EncodedVideoChunk' in window) {
       const canvas = h('canvas', { 'aria-hidden': 'true' });
       show(canvas);
-      note.textContent = 'live (H.264)';
+      say('live (H.264)', true);
       stopTransport = startH264(id, canvas, () => {
         // Once it failed, the other views of this session go straight to MJPEG.
         h264Failed = true;
@@ -181,7 +206,7 @@ export function liveView(id, scope, { send, h264 = false, fps = 8, width = 480, 
   let stopped = false;
   scope.on(document, 'visibilitychange', () => {
     if (stopped) return;
-    if (document.hidden) { stopTransport(); stopTransport = () => {}; note.textContent = 'paused'; } else start();
+    if (document.hidden) { stopTransport(); stopTransport = () => {}; say('paused'); } else start();
   });
   scope.add(() => { stopped = true; stopTransport(); clearTimeout(typing); });
 
@@ -248,9 +273,8 @@ export function liveView(id, scope, { send, h264 = false, fps = 8, width = 480, 
   });
   surface.addEventListener('blur', flush);
 
-  const buttons = keys && h('div', { class: 'live-keys', role: 'group', 'aria-label': 'Device buttons' },
-    NAV.map(([text, name]) => h('button', { type: 'button', class: 'btn small', onclick: () => send('key', { name }) }, text)));
+  const buttons = keys && deviceKeys((name) => send('key', { name }), { extra });
 
   start();
-  return h('div', { class: 'live' }, surface, buttons);
+  return h('div', { class: `live ${keys === 'side' ? 'side' : ''}` }, frame ? h('div', { class: 'device' }, surface) : surface, buttons);
 }

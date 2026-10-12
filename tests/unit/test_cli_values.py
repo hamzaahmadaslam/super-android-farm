@@ -44,6 +44,33 @@ def test_dict_entries_keep_dots_in_the_entry_name():
     assert patch("device.props.ro.serialno=ABC") == {"device": {"props": {"ro.serialno": "ABC"}}}
 
 
+@pytest.mark.parametrize("empty", ["", "  ", "{}"])
+def test_an_empty_value_empties_a_whole_map(empty):
+    # A patch merges maps entry by entry, so `{}` would change nothing: null is what removes.
+    assert patch(f"extra_props={empty}") == {"extra_props": None}
+    assert patch(f"device.props={empty}") == {"device": {"props": None}}
+    assert patch(f"extra_props.ro.x={empty}") == {"extra_props": {"ro.x": empty}}      # one entry: a value like any other
+    assert patch("fps=30", f"extra_props={empty}") == {"fps": 30, "extra_props": None}
+
+
+def test_a_map_cannot_be_emptied_and_filled_in_one_command():
+    # One patch cannot say "remove everything, then add": the entries would simply be merged in.
+    for order in (("extra_props=", "extra_props.ro.x=1"), ("extra_props.ro.x=1", "extra_props="),
+                  ("device.props=", "device.props.ro.x=1")):
+        with pytest.raises(values.KeyValueError, match="in two commands"):
+            patch(*order)
+    assert patch("extra_props={ro.x: 1}") == {"extra_props": {"ro.x": 1}}
+    assert patch("fps=default", "fps=30") == {"fps": 30}                                  # the last one still wins elsewhere
+
+
+def test_the_server_empties_the_map_for_that_patch(tmp_path):
+    from superfarm.core.instances import _apply_patch
+    saved = {"extra_props": {"ro.a": "1", "ro.b": "2"}, "fps": 30}
+    assert _apply_patch(saved, patch("extra_props=")) == {"fps": 30}                     # gone: the model's default is {}
+    assert _apply_patch(saved, {"extra_props": {}}) == saved                              # which is why {} is not sent
+    assert InstanceSpec.model_validate({"id": 1, **_apply_patch(saved, patch("extra_props="))}).extra_props == {}
+
+
 @pytest.mark.parametrize("word", ["default", "", "DEFAULT"])
 def test_optional_fields_can_go_back_to_the_farm_default(word):
     assert patch(f"gpu_mode={word}") == {"gpu_mode": None}

@@ -53,6 +53,8 @@ HAL_SERVICE = "android.hardware.camera.provider@2.5-external-service"
 # What the microphone shim expects; anything else would play at the wrong speed.
 MIC_RATE = 48000
 MIC_CHANNELS = 2
+# Where OBS is pointed, not a password: ffmpeg's listener accepts a publisher whatever app and
+# key it names. What protects the ingest is the address it listens on (media.camera.rtmp_bind).
 RTMP_APP = "live"
 RTMP_KEY = "camera"
 RTMP_SOURCE = "rtmp"
@@ -131,7 +133,8 @@ def file_input(path: Path) -> list[str]:
 
 
 def rtmp_input(url: str) -> list[str]:
-    """Wait for one publisher (OBS and friends) on the ingest address."""
+    """Wait for one publisher (OBS and friends) on the ingest address. Whoever connects first
+    is taken: the listener has no authentication and does not check the stream key."""
     return ["-fflags", "nobuffer", "-analyzeduration", "1000000", "-listen", "1", "-i", url]
 
 

@@ -6,8 +6,11 @@ that must be `async` (uploads, streams) hand blocking work to `run_in_threadpool
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +28,8 @@ from .errors import ApiError
 
 MAX_IDS = 500
 _PLAIN_ID = re.compile(r"^[0-9]{1,4}$")
+IDEMPOTENCY_HEADER = "idempotency-key"
+_IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,128}$")       # printable ASCII, no spaces
 
 
 class Body(BaseModel):
@@ -46,6 +51,65 @@ class Targets(Body):
         if (self.ids is None) == (self.selector is None):
             raise ValueError("give exactly one of `ids` or `selector`")
         return self
+
+
+class _Remembered:
+    def __init__(self, fingerprint: str, expires: float):
+        self.fingerprint, self.expires = fingerprint, expires
+        self.lock = threading.Lock()
+        self.done, self.answer = False, None
+
+
+class Idempotency:
+    """The answers to requests that carried an `Idempotency-Key` header, so that the same
+    request sent again (a retry after a timeout, a double click) gets the first answer
+    instead of doing the work a second time.
+
+        same key, same body      the first answer again; `run` reports it as replayed. Sent
+                                 at the same moment, the second waits for the first.
+        same key, another body   422 idempotency_key_reused
+        the first one failed     nothing is remembered: the next request with the key runs
+
+    Kept in memory only (a daemon restart forgets them), for `ttl` seconds, at most `limit`
+    keys (the oldest go first). One per app."""
+
+    def __init__(self, ttl: float = 600.0, limit: int = 256):
+        self.ttl, self.limit = ttl, limit
+        self.clock: Callable[[], float] = time.monotonic
+        self._lock = threading.Lock()
+        self._entries: dict[str, _Remembered] = {}
+
+    def run(self, key: str | None, body: BaseModel, fn: Callable[[], Any]) -> tuple[Any, bool]:
+        """fn() once per key. Returns (answer, replayed). No key: fn() every time."""
+        if key is None:
+            return fn(), False
+        if not _IDEMPOTENCY_KEY.match(key):
+            raise ApiError(400, "bad_request", "Idempotency-Key must be 1 to 128 printable ASCII characters without spaces")
+        fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+        now = self.clock()
+        with self._lock:
+            for old in [k for k, e in self._entries.items() if e.expires <= now]:
+                del self._entries[old]
+            entry = self._entries.get(key)
+            if entry is None:
+                while len(self._entries) >= self.limit:
+                    del self._entries[next(iter(self._entries))]
+                entry = self._entries[key] = _Remembered(fingerprint, now + self.ttl)
+        if entry.fingerprint != fingerprint:
+            raise ApiError(422, "idempotency_key_reused", "this Idempotency-Key was first sent with a different request; "
+                                                          "use a new key for a new request")
+        with entry.lock:
+            if entry.done:
+                return entry.answer, True
+            try:
+                entry.answer = fn()
+            except BaseException:
+                with self._lock:
+                    if self._entries.get(key) is entry:
+                        del self._entries[key]
+                raise
+            entry.done = True
+            return entry.answer, False
 
 
 def farm_of(request: Request) -> Farm:

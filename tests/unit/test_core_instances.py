@@ -626,6 +626,52 @@ def test_update_validates_and_takes_effect_later(farm):
         farm.mgr.update(9, {"name": "x"})
 
 
+def test_update_merges_maps_replaces_lists_and_null_removes(farm):
+    one(farm, tags=["eu", "batch-1"], fps=30, extra_boot_args=["androidboot.a=1", "androidboot.b=2"],
+        extra_props={"debug.one": "1", "debug.two": "2"}, resources={"cpus": 3, "memory_mb": 2048},
+        network={"mode": "proxy", "proxy": "10.0.0.1:3128"})
+    created = farm.store.get(1).created
+
+    # maps merge key by key; a key set to null is removed, the others stay
+    spec = farm.mgr.update(1, {"extra_props": {"debug.one": None, "debug.three": "3"}})
+    assert spec.extra_props == {"debug.two": "2", "debug.three": "3"}
+    assert farm.mgr.update(1, {"extra_props": {}}).extra_props == spec.extra_props      # nothing named, nothing changed
+    assert farm.mgr.update(1, {"extra_props": {"debug.never-set": None}}).extra_props == spec.extra_props
+    assert farm.mgr.update(1, {"resources": {"cpus": None}}).resources.model_dump(exclude_none=True) == {"memory_mb": 2048}
+    assert farm.mgr.resolved(1).cpus == farm.config.resources.cpus                    # back to the farm default
+
+    # lists are replaced whole, never appended to
+    assert farm.mgr.update(1, {"tags": ["us"]}).tags == ["us"]
+    assert farm.mgr.update(1, {"extra_boot_args": ["androidboot.b=2"]}).extra_boot_args == ["androidboot.b=2"]
+    assert farm.mgr.update(1, {"tags": []}).tags == []
+
+    # null on a field removes the override: farm default again, or empty
+    spec = farm.mgr.update(1, {"fps": None, "extra_boot_args": None, "extra_props": None, "network": None,
+                               "name": None, "tags": None})
+    assert spec.fps is None and spec.extra_boot_args == [] and spec.extra_props == {} and spec.tags == []
+    assert spec.network.mode is None and spec.network.proxy is None and spec.name == ""
+    assert farm.mgr.resolved(1).props == {} and farm.mgr.resolved(1).net_mode == "direct"
+    assert farm.store.get(1) == spec and spec.created == created
+
+    # a map that was empty takes new keys; a null among them has nothing to remove
+    assert farm.mgr.update(1, {"extra_props": {"debug.x": "1", "debug.y": None}}).extra_props == {"debug.x": "1"}
+
+
+def test_update_can_remove_one_device_property_but_never_the_identity(farm):
+    before = one(farm, device={"profile": "samsung-s23", "props": {"ro.extra.flag": "1"}})
+    spec = farm.mgr.update(1, {"device": {"props": {"ro.extra.flag": None}, "timezone": "Europe/Rome"}})
+    assert "ro.extra.flag" not in spec.device.props and spec.device.props["ro.product.model"] == "SM-S911B"
+    assert spec.device.android_id == before.device.android_id and spec.device.serial == before.device.serial
+    assert farm.mgr.update(1, {"device": {"timezone": None}}).device.timezone is None
+    with pytest.raises(ValueError, match="device identity cannot be removed"):
+        farm.mgr.update(1, {"device": None})
+    for fact in ({"id": None}, {"id": 2}):
+        with pytest.raises(ValueError, match="id cannot be changed"):
+            farm.mgr.update(1, fact)
+    assert farm.mgr.update(1, {"id": 1, "created": 0, "notes": "kept"}).created == before.created
+    assert farm.store.get(1).device.android_id == before.device.android_id
+
+
 def test_update_to_another_device_profile_swaps_its_properties(farm):
     spec = one(farm, device={"profile": "samsung-s23"})
     new = farm.mgr.update(1, {"device": {"profile": "xiaomi-13"}})
@@ -772,8 +818,8 @@ def test_autostart_picks_configured_and_flagged_androids(farm):
     farm.mgr.update(1, {"tags": []})
     farm.mgr.update(1, {"autostart": True})
     farm.mgr.update(3, {"tags": []})
-    assert farm.mgr.autostart().targets == [1]
-    farm.mgr.config.performance.autostart = "tag:always"
+    assert farm.tasks.wait(farm.mgr.autostart(), timeout=20).targets == [1]     # finished: a second bulk start
+    farm.mgr.config.performance.autostart = "tag:always"                        # on the same Android is refused until then
     task = farm.tasks.wait(farm.mgr.autostart(), timeout=20)
     assert task.targets == [1, 2]
     farm.mgr.config.performance.autostart = ""

@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from ..common import EXIT_FAILED, EXIT_OK, Ctx, confirm, one_id
+from ..client import CliError
+from ..common import EXIT_FAILED, EXIT_OK, EXIT_USAGE, Ctx, confirm, one_id, report, wait_for
 from ..render import size, when
 
 
@@ -45,9 +46,50 @@ def verify(ctx: Ctx) -> int:
     return EXIT_OK if good else EXIT_FAILED
 
 
+# Flags of `sf backup restore` that are fields of POST /api/backups/restore. Only for farm backups.
+_FARM_CHOICES = ("trust", "restore_config", "restore_secrets")
+
+
+def _restore_farm(ctx: Ctx, body: dict[str, Any]) -> int:
+    """Restore the farm's settings and say everything that was not taken as it was saved."""
+    response = ctx.api.post("/api/backups/restore", body)
+    task = response.get("task") if isinstance(response, dict) else None
+    if not ctx.wait or not isinstance(task, dict) or "id" not in task:
+        return ctx.finish(response)
+    final = wait_for(ctx, task)
+    code = report(ctx, final)
+    output = final.get("output")
+    if ctx.out.json_mode or code != EXIT_OK or not isinstance(output, dict):
+        return code
+    out = ctx.out
+    ids = ", ".join(str(i) for i in output.get("instances") or []) or "none"
+    out.print(f"restored {len(output.get('restored') or [])} file(s); Androids: {ids}")
+    for line in output.get("adjusted") or []:
+        out.print(f"changed: {line}")
+    for line in output.get("skipped") or []:
+        out.print(f"not restored: {line}")
+    if output.get("missing_vpn_profiles"):
+        out.note("VPN profiles the Androids refer to but this farm does not have (import them with sf vpn import): "
+                 + ", ".join(str(n) for n in output["missing_vpn_profiles"]))
+    held_back = [line for line in output.get("skipped") or [] if "made by another farm" in str(line)]
+    if not output.get("own") and (held_back or output.get("adjusted")):
+        out.note("This backup was not made by this farm, so only what cannot do harm was taken from it. If it is "
+                 "yours (the farm before a reinstall), repeat with --trust for the Androids exactly as saved, "
+                 "--restore-config for config.yaml, --restore-secrets for VPN profiles, logins and tokens.")
+    return code
+
+
 def restore(ctx: Ctx) -> int:
     args = ctx.args
     body: dict[str, Any] = {"archive": args.archive}
+    chosen = {name: True for name in _FARM_CHOICES if getattr(args, name)}
+    if args.archive.startswith("farm/"):
+        if args.over is not None or args.keep_network:
+            raise CliError("a farm backup restores settings, not one Android: leave --over and --keep-network out",
+                           EXIT_USAGE)
+        return _restore_farm(ctx, {**body, **chosen})
+    if chosen:
+        raise CliError("--trust, --restore-config and --restore-secrets are for farm backups (farm/<time>)", EXIT_USAGE)
     if args.over is not None:
         target = one_id(args.over)
         if not confirm(ctx, f"Replace everything Android {target} holds now with backup {args.archive}? "
@@ -104,14 +146,26 @@ def register(b: Any, sub: argparse._SubParsersAction) -> None:
     p.add_argument("archive", help="backup name as shown by `sf backup list`")
     p.add_argument("--deep", action="store_true", help="also read the whole archive to check it can be unpacked")
     p = b.add(backup, "restore", restore, "restore a backup as a new Android, or over an existing one",
-              "sf backup restore android-3/20250101-040000\nsf backup restore android-3/20250101-040000 --over 3",
+              "sf backup restore android-3/20250101-040000\nsf backup restore android-3/20250101-040000 --over 3\n"
+              "sf backup restore farm/20250101-050000",
               description="Without --over the backup becomes a NEW Android and nothing existing is touched. "
-                          "With --over ID that Android's data is replaced: it must be stopped, and you are asked first.")
+                          "With --over ID that Android's data is replaced: it must be stopped, and you are asked first. "
+                          "A farm backup (farm/<time>) merges settings into this farm and never overwrites what "
+                          "exists. One this farm made itself is restored in full; from any other, only what cannot "
+                          "decide what runs on this machine is taken unless you say so with the flags below.")
     p.add_argument("archive", help="backup name as shown by `sf backup list`")
     p.add_argument("--over", metavar="ID", help="replace the data of this existing Android (asks first)")
     p.add_argument("--keep-network", action="store_true",
                    help="restoring as new: keep the network on even though the original Android still exists")
     p.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+    p.add_argument("--trust", action="store_true",
+                   help="farm backup from elsewhere: keep the Androids exactly as saved (custom image, data volume, "
+                        "boot arguments, autostart) and the schedules. Only for a backup you made yourself: "
+                        "it decides what runs on this machine with full privileges")
+    p.add_argument("--restore-config", action="store_true",
+                   help="farm backup from elsewhere: also take its config.yaml (never implied by --trust)")
+    p.add_argument("--restore-secrets", action="store_true",
+                   help="farm backup from elsewhere: also take its VPN profiles, logins and tokens")
     b.add(backup, "prune", prune, "delete old backups, keeping the newest backup.keep of each Android", "sf backup prune")
     p = b.add(backup, "farm", farm, "back up the farm itself: settings, Android definitions, automation",
               "sf backup farm")

@@ -90,6 +90,19 @@ def test_update_refuses_a_version_change_once_there_is_data(farm):
     assert farm.mgr.update(1, {"android_version": "14"}, force=True).android_version == "14"
 
 
+def test_going_back_to_the_version_that_wrote_the_data_needs_no_force(farm):
+    """The way out the refusal itself points to: a forced change that has not booted yet is undone freely."""
+    farm.mgr.create(template={"android_version": "13"})
+    farm.mgr.start(1)
+    farm.mgr.stop(1)
+    farm.mgr.update(1, {"android_version": "12"}, force=True)
+    with pytest.raises(NeedsForce):
+        farm.mgr.update(1, {"android_version": "14"})         # any other version is still a change of the data
+    assert farm.mgr.update(1, {"android_version": "13"}).android_version == "13"
+    result = farm.mgr.start(1)
+    assert result["warnings"] == [] and farm.safety == [] and image_of(farm) == "local/android:13"
+
+
 def test_data_without_a_recorded_version_still_counts_as_data(farm):
     """An adopted or restored volume: the farm never booted it, but it is not empty."""
     farm.mgr.create()
@@ -139,6 +152,35 @@ def test_downgrade_is_refused_at_start_unless_forced(farm):
     assert result["state"] == "booted" and image_of(farm) == "local/android:12"
     assert any(w.startswith("forced: booting data written by Android 13 on the older Android 12") for w in result["warnings"])
     assert farm.safety == [(1, "before-version-change", True)]
+
+
+def test_a_refused_downgrade_leaves_a_running_android_running(farm):
+    farm.mgr.create(template={"android_version": "13"})
+    farm.mgr.start(1)
+    farm.mgr.update(1, {"android_version": "12"}, force=True)
+    for action in (farm.mgr.restart, farm.mgr.recreate):
+        mark = len(farm.docker.calls)
+        with pytest.raises(NeedsForce, match="it is now set to Android 12"):
+            action(1)
+        changed = [c for c in farm.docker.calls[mark:] if c[0] in ("stop", "rm", "start", "create")]
+        assert changed == [] and farm.docker.running(ANDROID) and image_of(farm) == "local/android:13"
+    assert farm.safety == []
+
+
+def test_a_version_change_that_cannot_start_fails_before_the_stop_and_the_backup(farm):
+    """The safety backup needs the Android stopped, so it comes last: after everything else
+    that can refuse the start (here: the new version's image cannot be had)."""
+    farm.mgr.create(template={"android_version": "13"})
+    farm.mgr.start(1)
+    farm.mgr.update(1, {"android_version": "14"}, force=True)
+    del farm.docker.images["local/android:14"]
+    farm.docker.pull_fails = True
+    mark = len(farm.docker.calls)
+    with pytest.raises(StartError, match="could not pull local/android:14"):
+        farm.mgr.restart(1)
+    assert [c for c in farm.docker.calls[mark:] if c[0] in ("stop", "rm", "start", "create")] == []
+    assert farm.docker.running(ANDROID) and farm.safety == []
+    assert farm.store.state_get(1, "data_android_version") == "13"
 
 
 def test_a_version_change_on_a_running_android_stops_it_before_the_backup(farm):

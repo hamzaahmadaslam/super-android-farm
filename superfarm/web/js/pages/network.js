@@ -2,11 +2,13 @@
 // Android's connection is doing right now.
 
 import { del, get, post, put, upload } from '../api.js';
-import { badge, button, card, empty, field, loadInstances, option, pageHead } from '../common.js';
+import { badge, button, card, emptyState, field, loadInstances, option, pageHead, panel } from '../common.js';
+import { help } from '../components/help.js';
 import { confirmDialog, openDialog } from '../components/dialog.js';
 import { dataTable } from '../components/table.js';
 import { attempt, ok } from '../components/toast.js';
 import { bytes, h, replace } from '../dom.js';
+import { icon } from '../icons.js';
 
 const RUNNING = new Set(['running', 'booted']);
 
@@ -34,7 +36,7 @@ export async function render(root, _params, scope) {
         await loadProfiles();
       }, 'small danger') },
     ],
-    empty: empty('No VPN profiles', 'Upload the .ovpn (OpenVPN) or .conf (WireGuard) files from your provider. Directives that run scripts are stripped on import.'),
+    empty: emptyState('lock', 'No VPN profiles', 'Upload the .ovpn (OpenVPN) or .conf (WireGuard) files from your provider. Directives that run scripts are stripped on import.'),
   });
   async function loadProfiles() {
     profiles = (await get('/api/net/profiles')).profiles;
@@ -53,7 +55,7 @@ export async function render(root, _params, scope) {
         if (!await confirmDialog({ title: 'Delete these credentials?', message: `"${c.name}" is removed from the farm's secrets.`, confirm: 'Delete', danger: true })) return;
         await attempt(() => del(`/api/net/credentials/${encodeURIComponent(c.name)}`), 'Credentials deleted.');
         await loadCredentials();
-      } }, '×'))) : h('span', { class: 'muted' }, 'None stored yet.'));
+      } }, icon('x')))) : h('span', { class: 'muted' }, 'None stored yet.'));
   }
 
   // ------------------------------------------------------------- gateways
@@ -76,7 +78,7 @@ export async function render(root, _params, scope) {
         }, 'small danger'),
       ] },
     ],
-    empty: empty('No shared gateways', 'A gateway is one VPN connection that several Androids share. Add one, then set an Android’s network mode to "Shared VPN gateway".'),
+    empty: emptyState('network', 'No shared gateways', 'A gateway is one VPN connection that several Androids share. Add one, then set an Android’s network mode to "Shared VPN gateway".'),
   });
   async function loadGateways() {
     gatewayTable.update((await get('/api/net/gateways')).gateways);
@@ -109,13 +111,14 @@ export async function render(root, _params, scope) {
       { title: 'Profile / gateway', cell: (i) => (live.get(i.id) || {}).profile || (i.net || {}).profile || (i.net || {}).gateway || (i.net || {}).proxy || '' },
       { title: 'Tunnel', cell: (i) => { const s = live.get(i.id); return s ? [badge(s.state), s.detail ? h('div', { class: 'small muted' }, s.detail) : null] : (RUNNING.has(i.state) ? '' : h('span', { class: 'muted' }, 'not running')); } },
       { title: 'Public address', cell: (i) => (live.get(i.id) || {}).public_ip || '' },
-      { title: 'Kill switch', cell: (i) => {
+      { title: h('span', null, 'Kill switch ', help('killswitch')), cell: (i) => {
         const s = live.get(i.id);
         if (!s || !s.killswitch) return (i.net || {}).killswitch ? 'wanted' : 'off';
         return s.killswitch.active ? badge('ok', 'active') : badge(s.killswitch.enabled ? 'fail' : '', s.killswitch.enabled ? 'NOT active' : 'off');
       } },
     ],
-    empty: empty('No Androids yet', 'Create one on the Androids page.'),
+    empty: emptyState('devices', 'No Androids yet', 'Each Android\u2019s connection, public address and kill switch show up here once it exists.',
+      h('a', { class: 'btn primary', href: '#/androids/new' }, icon('plus'), 'New Android')),
   });
   let instances = [];
   async function loadStatus(refreshAddress) {
@@ -139,28 +142,27 @@ export async function render(root, _params, scope) {
   root.append(
     pageHead('Network', 'How Androids reach the internet: directly, through their own VPN tunnel, or through a shared gateway.'),
     h('div', { class: 'stack' },
-      h('section', { class: 'card' },
-        h('div', { class: 'card-head' }, h('h2', null, 'Status per Android'),
-          button('Refresh', () => attempt(() => loadStatus(false)), 'small'),
-          button('Check public addresses', () => attempt(() => loadStatus(true), 'Addresses checked.'), 'small')),
-        statusTable.el),
+      panel('Status per Android', { icon: 'network', topic: 'network', actions: [
+        button('Refresh', () => attempt(() => loadStatus(false)), 'small', 'restart'),
+        button('Check public addresses', () => attempt(() => loadStatus(true), 'Public addresses checked.'), 'small')] },
+      statusTable.el),
       card('VPN profiles',
         h('form', { class: 'toolbar', onsubmit: (event) => {
           event.preventDefault();
-          attempt(async () => {
+          return attempt(async () => {
             if (!profileFile.files.length) throw new Error('Choose one or more profile files first.');
             for (const one of profileFile.files) await upload('/api/net/profiles', one);
             profileFile.value = '';
             await loadProfiles();
           }, 'Profiles imported.');
-        } }, profileFile, h('button', { type: 'submit', class: 'btn primary' }, 'Import')),
+        } }, profileFile, h('button', { type: 'submit', class: 'btn primary' }, icon('upload'), 'Import')),
         profileTable.el),
       card('VPN credentials',
         h('p', { class: 'small muted' }, 'Username and password for profiles that ask for them. They are stored in the farm’s secrets and can be replaced or deleted, never read back.'),
         credList,
         h('form', { class: 'fields', autocomplete: 'off', onsubmit: (event) => {
           event.preventDefault();
-          attempt(async () => {
+          return attempt(async () => {
             await put(`/api/net/credentials/${encodeURIComponent(credName.value.trim())}`, { username: credUser.value, password: credPass.value });
             credUser.value = '';
             credPass.value = '';
@@ -170,9 +172,7 @@ export async function render(root, _params, scope) {
         field('Name', credName, '"default" is used unless a gateway or the config names another.'),
         field('Username', credUser), field('Password', credPass),
         h('div', { class: 'field' }, h('span', null, '\u00a0'), h('button', { type: 'submit', class: 'btn' }, 'Store')))),
-      h('section', { class: 'card' },
-        h('div', { class: 'card-head' }, h('h2', null, 'Shared gateways'), button('Add gateway', addGateway, 'small primary')),
-        gatewayTable.el)));
+      panel('Shared gateways', { icon: 'network', actions: button('Add gateway', addGateway, 'small primary', 'plus') }, gatewayTable.el)));
 
   await Promise.all([loadProfiles(), loadCredentials(), loadGateways()]);
   loadStatus(false).catch(() => {});

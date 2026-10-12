@@ -263,7 +263,10 @@ def plan(config: Config, paths: Paths, *, boot: bool | None = None, user: str | 
                 for key in optional:
                     ps = dist.packages(key)
                     if ps.names:
-                        actions.append(_run(dist.install_argv(ps.names), timeout=1800, optional=True))
+                        # The hint ("your release may not have it; get it from ...") is shown
+                        # only if this install does not succeed.
+                        actions.append({**_run(dist.install_argv(ps.names), timeout=1800, optional=True),
+                                        "hint": ps.hints.get(key, "")})
                     notes += [f"{k}: {h}" for k, h in ps.hints.items() if not ps.names]
         else:
             notes.append(f"{dist.name} is not a supported package family; install docker, adb, ffmpeg and "
@@ -491,6 +494,15 @@ def _execute(action: dict, root: Path, runner: Callable[..., proc.Result], varia
     raise ValueError(f"unknown action kind {kind!r}")
 
 
+def _brief(error: Exception) -> str:
+    """A failed command as one line: what was run and the last thing it said."""
+    if isinstance(error, proc.CommandError):
+        said = (error.stderr or error.stdout or "").strip().splitlines()
+        why = "timed out" if error.timed_out else f"exit {error.code}"
+        return f"{shlex.join(error.argv)} ({why}" + (f": {said[-1].strip()[:200]})" if said else ")")
+    return str(error)
+
+
 def apply(config: Config, paths: Paths, *, dry_run: bool = False, boot: bool | None = None,
           user: str | None = None, group: str | None = None, root: Path | str = "/",
           runner: Callable[..., proc.Result] | None = None, steps: list[dict] | None = None,
@@ -523,20 +535,22 @@ def apply(config: Config, paths: Paths, *, dry_run: bool = False, boot: bool | N
                 step["status"] = "dry-run"
             continue
         failures: list[str] = []
+        tolerated: list[str] = []
         for action in step["actions"]:
             try:
                 _execute(action, root, runner, variables)
             except (proc.CommandError, OSError, RuntimeError, KeyError, ValueError) as e:
                 if action.get("optional"):
+                    # Tolerated, but never silently: an optional package that did not
+                    # install is a feature the operator will miss later.
+                    tolerated.append(f"optional step did not succeed: {_brief(e)}"
+                                     + (f". {action['hint']}" if action.get("hint") else ""))
                     continue
                 failures.append(str(e))
                 # Later actions of a step build on earlier ones (mkswap needs the device).
                 break
-        if failures:
-            step["status"] = "failed"
-            step["detail"] = "; ".join(filter(None, [step["detail"], *failures]))
-        else:
-            step["status"] = "ok"
+        step["status"] = "failed" if failures else "ok"
+        step["detail"] = "; ".join(filter(None, [step["detail"], *failures, *tolerated]))
     return steps
 
 

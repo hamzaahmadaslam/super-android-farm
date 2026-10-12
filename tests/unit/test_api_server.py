@@ -294,3 +294,75 @@ def test_daemon_speaks_https_when_a_certificate_is_configured(tmp_path, clean_lo
         daemon.stop()
         thread.join(15)
     assert not thread.is_alive()
+
+
+# ------------------------------------------------- the address it is actually bound to
+
+def test_the_daemon_decides_about_authentication_from_the_address_it_binds(tmp_path, clean_logging):
+    daemon = Daemon(tmp_path / "home", host="192.0.2.10", port=18230, log_to_stderr=False)
+    try:
+        auth = daemon.app.state.auth
+        assert daemon.farm.config.server.host == "127.0.0.1"         # the config says loopback ...
+        assert auth.listen_host == "192.0.2.10" and auth.required    # ... the socket will not be
+        daemon.farm.set_config({"server": {"auth_required": False}})
+        assert auth.required
+    finally:
+        daemon.farm.close()
+
+
+# ------------------------------------------------------------------ forwarded headers
+
+def own_port() -> int:
+    for port in range(18231, 18260):
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    pytest.skip("no free port in 18231-18259")
+
+
+def test_forwarded_headers_are_trusted_from_nobody_by_default(tmp_path, clean_logging, monkeypatch):
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")                   # must not widen it behind the operator's back
+    daemon = Daemon(tmp_path / "home", port=18230, log_to_stderr=False)
+    try:
+        assert daemon.server.config.proxy_headers is False
+        assert daemon.server.config.forwarded_allow_ips == []
+    finally:
+        daemon.farm.close()
+    home = get_paths(tmp_path / "proxied").ensure()
+    home.config.write_text("server:\n  trusted_proxies: ['127.0.0.1', '10.0.0.0/8']\n")
+    daemon = Daemon(home.home, port=18230, log_to_stderr=False)
+    try:
+        assert daemon.server.config.proxy_headers is True
+        assert daemon.server.config.forwarded_allow_ips == ["127.0.0.1", "10.0.0.0/8"]
+    finally:
+        daemon.farm.close()
+
+
+@pytest.mark.parametrize("trusted,client,secure", [([], "127.0.0.1", False), (["127.0.0.1"], "203.0.113.9", True)])
+def test_a_forged_forwarded_address_is_not_what_gets_recorded(tmp_path, clean_logging, trusted, client, secure):
+    import json
+    home = get_paths(tmp_path / "home").ensure()
+    port = own_port()
+    home.config.write_text(f"server:\n  port: {port}\n  trusted_proxies: {json.dumps(trusted)}\n")
+    daemon = Daemon(home.home, log_to_stderr=False)
+    result: list[int] = []
+    thread = threading.Thread(target=lambda: result.append(daemon.run()))
+    thread.start()
+    try:
+        assert wait_for(lambda: daemon.server.started), "the server did not start"
+        forged = {"X-Forwarded-For": "203.0.113.9", "X-Forwarded-Proto": "https"}
+        base = f"http://127.0.0.1:{port}"
+        assert httpx.post(f"{base}/api/auth/login", json={"token": "guess"}, headers=forged).status_code == 401
+        good = httpx.post(f"{base}/api/auth/login", json={"token": read_token(home)}, headers=forged)
+        assert good.status_code == 200
+        assert ("Secure" in good.headers["set-cookie"]) is secure
+    finally:
+        daemon.stop()
+        thread.join(15)
+    assert result == [0]
+    denied = json.loads((home.logs / "audit-anonymous.log").read_text().splitlines()[0])
+    assert denied["status"] == 401 and denied["client"] == client
+    assert json.loads((home.logs / "audit.log").read_text().splitlines()[0])["client"] == client

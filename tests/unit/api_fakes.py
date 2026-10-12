@@ -5,6 +5,7 @@ exercised against the modules' real behaviour without a Docker daemon or a devic
 """
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 
 from core_fakes import Farm as CoreFarm
@@ -34,9 +35,10 @@ def make_farm(tmp_path, config: dict | None = None) -> tuple[Farm, CoreFarm]:
 class Api:
     """What a test needs: the farm, the fakes behind it, and clients with and without a token."""
 
-    def __init__(self, tmp_path, config: dict | None = None, *, web_dir=None):
+    def __init__(self, tmp_path, config: dict | None = None, *, web_dir=None, listen_host: str | None = None):
         self.farm, self.core = make_farm(tmp_path, config)
-        self.app = create_app(self.farm, web_dir=web_dir if web_dir is not None else tmp_path / "no-panel")
+        self.app = create_app(self.farm, web_dir=web_dir if web_dir is not None else tmp_path / "no-panel",
+                              **({"listen_host": listen_host} if listen_host else {}))
         self.token = read_token(self.farm.paths)
         self.anonymous = TestClient(self.app, base_url=BASE, raise_server_exceptions=False)
         self.client = TestClient(self.app, base_url=BASE, raise_server_exceptions=False,
@@ -50,14 +52,40 @@ class Api:
         assert not task.active, "task did not finish"
         return task.to_dict()
 
-    def audit_lines(self) -> list[dict]:
+    def audit_lines(self, name: str = "audit.log") -> list[dict]:
+        """The lines of the audit log; `audit-anonymous.log` holds the requests nobody authenticated."""
         import json
-        path = self.farm.paths.logs / "audit.log"
+        path = self.farm.paths.logs / name
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
     def close(self) -> None:
-        self.app.state.audit.close()
+        for name in ("audit", "audit_anonymous"):
+            log = getattr(self.app.state, name, None)
+            if log is not None:
+                log.close()
         self.farm.close()
+
+
+def closes(ws, timeout: float = 5.0) -> int | None:
+    """The code the server closes this test socket with, or None when it is still open after
+    `timeout`. It reads on a thread of its own: a socket that is wrongly left open must fail
+    the test, not hang it."""
+    got: list[int] = []
+
+    def read() -> None:
+        try:
+            while True:
+                message = ws.receive()                 # text and binary frames alike are skipped
+                if message["type"] == "websocket.close":
+                    got.append(message.get("code", 1000))
+                    return
+        except Exception:  # noqa: BLE001, S110 - the test closed the socket under the reader
+            pass
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(timeout)
+    return got[0] if got else None
 
 
 @contextmanager

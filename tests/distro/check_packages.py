@@ -15,8 +15,14 @@ import sys
 from superfarm.host import distro
 
 # Named after the running kernel. A container runs on the host's kernel, for which another
-# distribution has no package, so these cannot be judged here.
+# distribution has no package, so the exact name cannot be judged here.
 KERNEL_BOUND = {"kernel-headers"}
+# What can be judged: the header package of the distribution's own default kernel, which
+# follows the same naming pattern (os-release ID -> package).
+DEFAULT_KERNEL_HEADERS = {
+    "ubuntu": "linux-headers-generic", "debian": "linux-headers-amd64", "fedora": "kernel-devel",
+    "arch": "linux-headers", "opensuse-tumbleweed": "kernel-default-devel", "opensuse-leap": "kernel-default-devel",
+}
 # zypper tells "no such package" (exit 104) apart from "it exists, but installing it here
 # needs a decision" (exit 4: a dependency problem). The second is not a wrong name; it is
 # reported with zypper's own words so a person can judge it.
@@ -55,6 +61,15 @@ def main() -> int:
         ps = dist.packages(key)
         if key in KERNEL_BOUND:
             print(f"  skip  {key:16} {' '.join(ps.names)}  (named after the running kernel; not checkable in a container)")
+            standin = DEFAULT_KERNEL_HEADERS.get(dist.id)
+            if standin:
+                ok, said = resolves(dist.family, standin)
+                if ok or said.startswith(CONFLICT):
+                    print(f"  ok    {key + ' (pattern)':16} {standin}  (this distribution's own default kernel)")
+                else:
+                    print(f"        {dist.pkg_manager} said about {standin}: {said}")
+                    print(f"  FAIL  {key:16} no such package: {standin}  (the naming pattern for {dist.id} is wrong)")
+                    bad.append(f"{key}:{standin}")
             continue
         if not ps.names:
             print(f"  hint  {key:16} not packaged here; the installer prints: {ps.hints.get(key, '')[:90]}")

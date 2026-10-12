@@ -13,25 +13,26 @@ Everything the model returns is parsed as strict JSON and then reduced to the sh
 above; anything else is dropped. Screen text is sent as data, with field contents and
 anything named like a secret removed first.
 
-Plain urllib, no client library: one POST per question, a hard timeout, and no
-dependency to keep in step with a server.
+No client library: one POST per question with a hard timeout, sent through the farm's
+one model transport (superfarm/ai/models.py), and no dependency to keep in step with a
+server. The setting itself is also usable as the model profile named "automation".
 """
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 from typing import Any
 from collections.abc import Iterable
 from urllib.parse import urlsplit
 
+from ..ai.models import ModelError, Unreachable, http_json
 from ..config import LlmConfig
 from ..paths import Paths
 from ..util.files import safe_filename
 from .values import looks_secret
 
-MAX_REPLY_BYTES = 2 * 1024 * 1024
-RECOVERY_KEYS = ("back", "enter", "escape", "tab")
+# Keys a recovery may press: the ones that get *out* of something. Not tab or enter: they move
+# the focus and press what has it, which is a tap the never-tap list never sees.
+RECOVERY_KEYS = ("back", "escape")
 DIRECTIONS = ("up", "down", "left", "right")
 MAX_RECOVERY_ACTIONS = 5
 
@@ -159,33 +160,20 @@ class LlmClient:
         return self.base + path
 
     def _call(self, path: str, payload: dict | None) -> tuple[int, Any]:
-        headers = {"Accept": "application/json"}
-        body = None
-        if payload is not None:
-            body = json.dumps(payload).encode("utf-8")
-            headers["Content-Type"] = "application/json"
+        # The request itself is made by the farm's one model transport (ai/models.py), so
+        # its limits and its error handling are the same for every model the farm calls.
+        headers = {}
         if self.provider == "openai":
             key = self._api_key()
             if key:
                 headers["Authorization"] = f"Bearer {key}"
-        request = urllib.request.Request(self._url(path), data=body, headers=headers,  # noqa: S310 - scheme checked in __init__
-                                         method="POST" if body is not None else "GET")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
-                status, raw = response.status, response.read(MAX_REPLY_BYTES + 1)
-        except urllib.error.HTTPError as e:
-            status, raw = e.code, e.read(4096)
-        except (urllib.error.URLError, OSError, TimeoutError) as e:
-            reason = getattr(e, "reason", e)
-            raise LlmError(f"cannot reach the model server at {self.base}: {reason}. Check automation.llm.base_url "
+            return http_json(self._url(path), payload, headers=headers, timeout=self.timeout)
+        except Unreachable as e:
+            raise LlmError(f"cannot reach the model server at {self.base}: {e.reason}. Check automation.llm.base_url "
                            "and that the server is running.") from None
-        if len(raw) > MAX_REPLY_BYTES:
-            raise LlmError("the model server sent an implausibly large reply")
-        try:
-            data = json.loads(raw.decode("utf-8", errors="replace")) if raw.strip() else {}
-        except json.JSONDecodeError:
-            data = {"error": raw.decode("utf-8", errors="replace")[:300]}
-        return status, data
+        except ModelError as e:
+            raise LlmError(str(e)) from None
 
     @staticmethod
     def _error_text(data: Any) -> str:

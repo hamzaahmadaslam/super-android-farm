@@ -83,20 +83,21 @@ def _systemctl(runner: Callable[..., proc.Result], *args: str, check: bool = Tru
     return r
 
 
-def manager_variables(runner: Callable[..., proc.Result] = proc.run) -> set[str] | None:
+def manager_variables(runner: Callable[..., proc.Result] | None = None) -> set[str] | None:
     """Names of the variables the user manager hands to a service started now; None when
     there is no user manager to ask. Only names: values can name session cookie files and
     are of no use to the caller."""
     try:
-        r = _systemctl(runner, "show-environment")
+        r = _systemctl(runner or proc.run, "show-environment")
     except ServiceError:
         return None
     return {line.partition("=")[0] for line in r.stdout.splitlines() if "=" in line}
 
 
-def linger(user: str | None = None, runner: Callable[..., proc.Result] = proc.run) -> bool | None:
+def linger(user: str | None = None, runner: Callable[..., proc.Result] | None = None) -> bool | None:
     """Whether the user's manager (and so the service) runs without a login. None = unknown."""
     user = user or pwd.getpwuid(os.getuid()).pw_name
+    runner = runner or proc.run
     try:
         r = runner(["loginctl", "show-user", user, "--property=Linger", "--value"], timeout=10, check=False)
     except proc.CommandError:
@@ -106,7 +107,7 @@ def linger(user: str | None = None, runner: Callable[..., proc.Result] = proc.ru
 
 
 def install(paths: Paths, *, sf_bin: str | os.PathLike | None = None, enable: bool = True,
-            env: Mapping[str, str] | None = None, runner: Callable[..., proc.Result] = proc.run,
+            env: Mapping[str, str] | None = None, runner: Callable[..., proc.Result] | None = None,
             directory: Path | None = None) -> dict:
     """Install (or refresh) the user unit. Safe to repeat.
 
@@ -117,6 +118,7 @@ def install(paths: Paths, *, sf_bin: str | os.PathLike | None = None, enable: bo
         raise ServiceError("the daemon is a service of your desktop user: run this as that user, not as root "
                            "or with sudo (root has no display and no sound)")
     env = os.environ if env is None else env
+    runner = runner or proc.run
     sf = Path(sf_bin) if sf_bin else default_sf_bin()
     text = unit_text(paths, sf_bin=sf)
     target = (directory or unit_dir(env)) / UNIT
@@ -149,10 +151,11 @@ def install(paths: Paths, *, sf_bin: str | os.PathLike | None = None, enable: bo
             "linger": lingering, "notes": notes}
 
 
-def status(*, env: Mapping[str, str] | None = None, runner: Callable[..., proc.Result] = proc.run,
+def status(*, env: Mapping[str, str] | None = None, runner: Callable[..., proc.Result] | None = None,
            directory: Path | None = None) -> dict:
     """What `sf service status` and the doctor show. Never raises."""
     env = os.environ if env is None else env
+    runner = runner or proc.run
     target = (directory or unit_dir(env)) / UNIT
     out: dict = {"unit": str(target), "installed": target.is_file(), "active": "unknown", "enabled": "unknown",
                  "linger": linger(runner=runner), "manager": False, "display": []}

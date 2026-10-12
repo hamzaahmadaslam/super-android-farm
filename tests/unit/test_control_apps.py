@@ -1,4 +1,5 @@
 """Apps across the fleet: parsers for Android's output, and the Task semantics of rollouts."""
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -422,8 +423,16 @@ def test_backup_and_restore_app_data_round_trip(env, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_DATA_ROOT", str(data_root))
     apps = Apps(mgr, lib, tasks, docker=Docker(str(fake)))
 
-    task = done(tasks, apps.backup_data("1", PKG))
+    previous = os.umask(0o022)                    # the usual one: nothing here may rely on a strict umask
+    try:
+        task = done(tasks, apps.backup_data("1", PKG))
+    finally:
+        os.umask(previous)
     archive = Path(task.results[1]["detail"])
+    # An app's data is its logins and databases: owner-only, like a whole-Android backup.
+    modes = {p.name: stat.S_IMODE(p.stat().st_mode) for p in (archive, archive.with_name(archive.name + ".json"),
+                                                               archive.parent, archive.parent.parent)}
+    assert modes == {archive.name: 0o600, archive.name + ".json": 0o600, PKG: 0o700, "apps": 0o700}
     assert archive.parent == lib.paths.backups / "apps" / PKG and archive.name.startswith(f"{PKG}_android1_") and archive.suffixes[-2:] == [".tar", ".gz"]
     assert mgr.devices[1].ran(f"^am force-stop {PKG}$")                           # stopped first: no half-written files
     assert [b["file"] for b in apps.data_backups(PKG)] == [archive.name] and apps.data_backups()[0]["package"] == PKG
@@ -450,9 +459,36 @@ def test_backup_and_restore_app_data_round_trip(env, tmp_path, monkeypatch):
     assert (app / "files" / "save.db").read_bytes() == b"progress" * 1000         # refused before anything was wiped
     with pytest.raises(ValueError, match="only restored from"):
         apps.restore_app_data(1, PKG, tmp_path / "elsewhere.tar.gz")
+    # Archives copied in by hand have no manifest. Whatever the restore could not read to the
+    # end is refused while the app still has its data: a plain tar under a .gz name, a file
+    # cut short, one damaged on the way.
+    plain = archive.parent / "byhand.tar.gz"
+    with gzip.open(archive, "rb") as packed:
+        plain.write_bytes(packed.read())
+    cut = archive.parent / "cut.tar.gz"
+    cut.write_bytes(archive.read_bytes()[:archive.stat().st_size // 2])
+    damaged = archive.parent / "damaged.tar.gz"
+    content = bytearray(archive.read_bytes())
+    content[-6] ^= 0xFF                                                           # the checksum at the end of the gzip stream
+    damaged.write_bytes(bytes(content))
+    for unreadable in (plain, cut, damaged):
+        with pytest.raises(ValueError, match="not a readable app-data archive"):
+            apps.restore_app_data(1, PKG, unreadable)
+        assert (app / "files" / "save.db").read_bytes() == b"progress" * 1000, unreadable.name
     evil = make_tar(archive.parent / "evil.tar.gz", [(f"{PKG}/../../x", "file", b"x")])
     with pytest.raises(ValueError, match="outside"):
         apps.restore_app_data(1, PKG, evil)
+    # The same backup asked for twice at once (a double click): the second is refused and
+    # leaves the first one's file alone.
+    with monkeypatch.context() as same_second:
+        same_second.setattr(apps_mod.time, "strftime", lambda fmt: "20250101-000000")
+        being_written = archive.parent / f".{PKG}_android1_20250101-000000.tar.gz.part"
+        being_written.write_bytes(b"half of the first one")
+        with pytest.raises(RuntimeError, match="is being written right now"):
+            apps.backup_app_data(1, PKG)
+        assert being_written.read_bytes() == b"half of the first one"
+        being_written.unlink()
+        assert apps.backup_app_data(1, PKG).name == f"{PKG}_android1_20250101-000000.tar.gz"
     with pytest.raises(RuntimeError, match="no data"):
         apps.backup_app_data(1, "org.not.installed")
     with pytest.raises(RuntimeError, match="not installed"):

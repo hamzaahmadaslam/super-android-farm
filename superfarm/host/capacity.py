@@ -12,7 +12,9 @@ import os
 from pathlib import Path
 
 from ..config import Config
-from .gpu import GpuInfo, planned_mode
+from ..paths import Paths, get_paths
+from . import gpu as gpu_mod
+from .gpu import GpuInfo
 
 # ----------------------------------------------------------------- measured: memory
 # System RAM one booted Android costs. Source: relay memory test, 927-944 MB per Android
@@ -124,23 +126,37 @@ def per_android_ram_mb(mode: str, *, trimmed: bool, limit_mb: int = 0) -> int:
     return ram if not limit_mb else min(ram, limit_mb + (RAM_NVIDIA_EXTRA_MB if mode == "nvidia" else 0))
 
 
-def _best_mode(config: Config, gpus: list[GpuInfo]) -> str:
-    """The concrete backend the farm's default mode aims for, judged from the cards alone
-    (no file checks: this is a planning figure, the doctor reports whether the NVIDIA
-    runtime is actually built). auto / igpu / dgpu are resolved to a vendor here."""
-    return planned_mode(config, gpus)
+def _default_mode(config: Config, paths: Paths, gpus: list[GpuInfo], runtime: dict | None) -> dict:
+    """The backend an Android with the farm's default settings would get if started now.
+
+    The decision is gpu.choose()'s own (see gpu.default_choice), so an NVIDIA card whose
+    runtime is not built counts as what `auto` really falls back to, not as NVIDIA. When
+    the configured mode cannot be served at all, such an Android would not start: the
+    figures are then those of the mode that was asked for (the CPU for igpu / dgpu, which
+    name no backend) and `mode_available` is False."""
+    choice, blocked = gpu_mod.default_choice(config, paths, gpus=gpus, runtime=runtime)
+    if choice is not None:
+        return {"mode": choice.mode, "mode_available": True, "mode_reason": choice.reason}
+    wanted = config.gpu.mode
+    return {"mode": wanted if wanted in gpu_mod.VENDOR_MODES else "software", "mode_available": False,
+            "mode_reason": blocked}
 
 
 def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", root: Path | str = "/",
-             cpu_threads: int | None = None, running: int | None = None) -> dict:
-    """Max Androids by RAM, CPU and VRAM for the configured GPU mode, the binding
-    constraint, and advice ordered by how much it buys.
+             cpu_threads: int | None = None, running: int | None = None, paths: Paths | None = None,
+             runtime: dict | None = None) -> dict:
+    """Max Androids by RAM, CPU and VRAM, the binding constraint, and advice ordered by how
+    much it buys. The figures are for the rendering mode an Android with the farm's default
+    settings would really get now (`mode`, with `mode_reason` saying why that one).
 
     workload   "video" (worst case measured) or "light" (UI only)
     running    Androids running right now, when the caller knows. Lets the estimate tell
                farm memory apart from everything else the machine is doing (a desktop
                session with browsers easily holds 10 GB) and adds `max_now`: what fits
                while that other use stays as it is.
+    paths      the farm home, where the NVIDIA runtime is looked for; default: the home
+               from $SUPERFARM_HOME, as everywhere else
+    runtime    venus.runtime_status(), when the caller already has it (tests)
     """
     if workload not in WORKLOADS:
         raise ValueError(f"workload must be one of {WORKLOADS}")
@@ -148,7 +164,8 @@ def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", ro
     total = mem.get("MemTotal", 0)
     available = mem.get("MemAvailable", 0)
     threads = cpu_threads or os.cpu_count() or 1
-    mode = _best_mode(config, gpus)
+    drawing = _default_mode(config, paths or get_paths(), gpus, runtime)
+    mode = drawing["mode"]
     trimmed = config.performance.trim_packages
     per_ram = per_android_ram_mb(mode, trimmed=trimmed, limit_mb=config.resources.memory_mb)
     reserve = config.performance.reserve_host_mb
@@ -197,7 +214,8 @@ def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", ro
     candidates = {k: v["max"] for k, v in limits.items()}
     binding = min(candidates, key=lambda k: (candidates[k], ("ram", "cpu", "vram").index(k)))
     result = {
-        "mode": mode, "workload": workload, "limits": limits, "max_instances": candidates[binding],
+        "mode": mode, "requested_mode": config.gpu.mode, "mode_available": drawing["mode_available"],
+        "mode_reason": drawing["mode_reason"], "workload": workload, "limits": limits, "max_instances": candidates[binding],
         "binding": binding, "zram_active": zram, "swappiness": _swappiness(root),
         "assumptions": {
             "ram_per_android_mb": RAM_PER_ANDROID_MB, "ram_nvidia_extra_mb": RAM_NVIDIA_EXTRA_MB,
@@ -215,6 +233,16 @@ def _advice(config: Config, gpus: list[GpuInfo], est: dict) -> list[str]:
     mode, binding, limits = est["mode"], est["binding"], est["limits"]
     out: list[str] = []
     per_ram = limits["ram"]["per_android_mb"]
+    reason = est["mode_reason"]
+    if not est["mode_available"]:
+        out.append(f"No Android can start with the farm's rendering mode ({est['requested_mode']}) right now: "
+                   f"{reason} The figures here are for {mode} mode.")
+    elif gpu_mod.NVIDIA_SKIPPED in reason:
+        # Said first and in full: the operator sees an NVIDIA card in the machine and would
+        # otherwise read these figures as that card's.
+        out.append(f"The figures are for {mode} mode, because that is what an Android started now would get "
+                   f"({reason}). Once NVIDIA mode works, each Android needs about {RAM_NVIDIA_EXTRA_MB} MB more "
+                   "RAM and video memory becomes a limit too.")
     if binding == "ram":
         if not config.performance.trim_packages:
             gain = _gain(limits["ram"], per_ram, per_ram - RAM_TRIM_SAVING_MB)
@@ -243,14 +271,14 @@ def _advice(config: Config, gpus: list[GpuInfo], est: dict) -> list[str]:
         out.append("More RAM is the only lever with no trade-off: budget about "
                    f"{per_ram} MB per Android on top of what the host itself uses.")
     if binding == "cpu":
-        if mode == "software" and gpus:
-            usable = sorted({m for g in gpus for m in g.usable_modes})
-            if usable:
-                out.append(f"Use a GPU mode ({', '.join(usable)}): drawing on the CPU costs roughly five times "
-                           "the CPU of a GPU mode on UI screens and more than twice in video.")
-        elif mode == "software":
+        usable = sorted({m for g in gpus for m in g.usable_modes})
+        if mode == "software" and usable and est["requested_mode"] == "software":
+            out.append(f"Use a GPU mode ({', '.join(usable)}): drawing on the CPU costs roughly five times "
+                       "the CPU of a GPU mode on UI screens and more than twice in video.")
+        elif mode == "software" and not usable:
             out.append("No usable GPU was found; software rendering is the most expensive mode. Any Intel or "
                        "AMD GPU (integrated is enough) removes more than half the CPU load.")
+        # Otherwise a card is there and could not be used: the first line of the advice says why.
         out.append(f"Lowering android.fps helps UI-heavy screens; in video it saved only about "
                    f"{FPS_VIDEO_SAVING_PERCENT} points of CPU (25 -> 15 fps), so do not expect much there.")
         out.append("Keep performance.disable_animations on and stagger bulk starts "

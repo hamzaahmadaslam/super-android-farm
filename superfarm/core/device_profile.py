@@ -40,8 +40,6 @@ _ANDROID_ID = re.compile(r"^[0-9a-f]{16}$")
 # Runs a command as root inside the Android container and returns its output. ADB's shell is
 # an unprivileged user on these images, and a few settings (mock location) need root.
 RootExec = Callable[[Sequence[str]], str]
-# Looks up where an Android's traffic leaves the internet: {"timezone": ..., "lat": ..., "lon": ...}.
-Locator = Callable[[Resolved], "dict | None"]
 
 
 # --------------------------------------------------------------------------- presets
@@ -187,28 +185,33 @@ def parse_geo(value: str) -> tuple[float, float]:
     return lat, lon
 
 
+def check_timezone(value: str) -> str:
+    """An Olson zone name, or ValueError.
+
+    `auto` has the shape of a zone name and is refused by name: the farm has no way to tell
+    where an Android's traffic leaves the internet, so there is nothing to derive a zone from."""
+    if not _TIMEZONE.match(str(value)) or str(value).lower() == "auto":
+        raise ValueError(f"bad time zone {value!r}: expected an Olson name like Europe/Berlin")
+    return str(value)
+
+
 def validate_identity(identity: DeviceIdentity) -> None:
     """Everything apply_post_boot() and boot_props() would reject, checked up front."""
     boot_props(identity)
-    if identity.timezone and identity.timezone != "auto" and not _TIMEZONE.match(identity.timezone):
-        raise ValueError(f"bad time zone {identity.timezone!r}: expected an Olson name like Europe/Berlin")
-    if identity.geo and identity.geo != "auto":
+    if identity.timezone:
+        check_timezone(identity.timezone)
+    if identity.geo:
         parse_geo(identity.geo)
 
 
 # ------------------------------------------------------------------------- post-boot
 
-def _is_set(value: str) -> bool:
-    return value not in ("", "null")
-
-
-def apply_post_boot(adb: Adb, r: Resolved, *, root_exec: RootExec | None = None,
-                    locate: Locator | None = None) -> dict:
+def apply_post_boot(adb: Adb, r: Resolved, *, root_exec: RootExec | None = None) -> dict:
     """Bring a booted Android's mutable identity in line with `r.device`.
 
     Idempotent and cheap when nothing changed (reads before it writes). One failing item
     never stops the others; the returned dict lists what was `applied` and any `warnings`.
-    `root_exec` and `locate` are optional helpers supplied by the instance manager."""
+    `root_exec` is supplied by the instance manager; without it the mock location cannot be set."""
     identity = r.device
     applied: list[str] = []
     warnings: list[str] = []
@@ -231,24 +234,11 @@ def apply_post_boot(adb: Adb, r: Resolved, *, root_exec: RootExec | None = None,
         adb.setting_put("secure", "android_id", identity.android_id)
         return True
 
-    where: dict | None = None
-
-    def located() -> dict:
-        nonlocal where
-        if where is None:
-            where = (locate(r) if locate else None) or {}
-        return where
-
     def timezone() -> bool:
         zone = identity.timezone or ""
-        if zone == "auto":
-            zone = str(located().get("timezone") or "")
-            if not zone:
-                raise RuntimeError("the exit address could not be located; set device.timezone to a zone name")
         if not zone:
             return False
-        if not _TIMEZONE.match(zone):
-            raise ValueError(f"bad time zone {zone!r}")
+        check_timezone(zone)
         if adb.getprop("persist.sys.timezone") == zone:
             return False
         # The alarm service updates running apps too; the bare property is the fallback
@@ -275,11 +265,6 @@ def apply_post_boot(adb: Adb, r: Resolved, *, root_exec: RootExec | None = None,
         spot = identity.geo or ""
         if not spot:
             return False
-        if spot == "auto":
-            here = located()
-            if here.get("lat") is None or here.get("lon") is None:
-                raise RuntimeError("the exit address could not be located; set device.geo to `lat,lon`")
-            spot = f"{here['lat']},{here['lon']}"
         lat, lon = parse_geo(spot)
         if root_exec is None:
             raise RuntimeError("mock location needs root inside the Android, which is not available here")

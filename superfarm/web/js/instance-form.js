@@ -47,6 +47,26 @@ function setPath(object, path, value) {
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
+// An error shaped like the API's validation errors, so it is shown at the field.
+function fieldError(path, message) {
+  const error = new Error(`${path}: ${message}`);
+  error.detail = [{ field: path, message }];
+  return error;
+}
+
+// A map edited as a whole, sent the way the API merges it: only the keys that changed,
+// null for each key that was removed, and null for the field itself when it was emptied
+// (an empty map would merge to "no change" and remove nothing).
+function mapPatch(before, after) {
+  const was = before || {};
+  const now = after || {};
+  if (!Object.keys(now).length) return Object.keys(was).length ? null : undefined;
+  const changes = {};
+  for (const [key, value] of Object.entries(now)) if (was[key] !== value) changes[key] = value;
+  for (const key of Object.keys(was)) if (!(key in now)) changes[key] = null;
+  return Object.keys(changes).length ? changes : undefined;
+}
+
 // Controls. Each returns { el, read(), write(value) }; read() gives null for "empty".
 function textControl(attrs = {}) {
   const el = h('input', { type: 'text', spellcheck: false, autocomplete: 'off', ...attrs });
@@ -135,15 +155,15 @@ function fields(options, mode) {
     { group: 'Android', items: [
       { path: 'android_version', label: 'Android version', control: selectControl(versions.map((v) => [v, `Android ${v}`]), farm(cfg.android.default_version)),
         help: mode === 'create' ? 'A farm may mix versions freely.' : 'Changing the version of an Android that has data is refused unless forced: data written by a newer release does not boot on an older one.' },
-      { path: 'device.profile', label: 'Device profile', control: selectControl([['random', 'Random preset'], ['none', 'None (the image’s own identity)'], ...deviceProfiles], farm(cfg.device.profile)),
+      { path: 'device.profile', label: 'Device profile', topic: 'device-profile', control: selectControl([['random', 'Random preset'], ['none', 'None (the image’s own identity)'], ...deviceProfiles], farm(cfg.device.profile)),
         empty: cfg.device.profile, help: 'The phone model this Android reports to apps.' },
       { path: 'device.locale', label: 'Language', control: textControl({ placeholder: cfg.device.locale }), help: 'For example en-US.' },
-      { path: 'device.timezone', label: 'Time zone', control: textControl({ placeholder: cfg.device.timezone || 'host’s zone' }), help: 'For example Europe/Berlin, or auto (from the VPN exit).' },
-      { path: 'device.geo', label: 'Mock location', control: textControl({ placeholder: cfg.device.geo || 'lat,lon' }), help: 'lat,lon or auto.' },
+      { path: 'device.timezone', label: 'Time zone', control: textControl({ placeholder: cfg.device.timezone || 'host’s zone' }), help: 'An Olson name, for example Europe/Berlin.' },
+      { path: 'device.geo', label: 'Mock location', control: textControl({ placeholder: cfg.device.geo || 'lat,lon' }), help: 'lat,lon, for example 52.52,13.405.' },
       { path: 'camera', label: 'Virtual camera and microphone', control: triControl(farm(cfg.media.camera.enabled ? 'on' : 'off')) },
     ] },
     { group: 'Rendering and screen', items: [
-      { path: 'gpu', label: 'Rendering', control: selectControl(rendering, farm(cfg.gpu.mode)), virtual: true,
+      { path: 'gpu', label: 'Rendering', topic: 'rendering', apiPath: 'gpu_mode', control: selectControl(rendering, farm(cfg.gpu.mode)), virtual: true,
         help: ['CPU only, integrated or discrete GPU, a vendor, or one exact card. Takes effect at the next start.',
           unavailable.length ? h('details', null, h('summary', null, `Why ${unavailable.length} choice(s) are unavailable on this machine`),
             h('ul', null, unavailable.map((o) => h('li', null, h('strong', null, o.label), `: ${o.reason}`)))) : null] },
@@ -151,7 +171,7 @@ function fields(options, mode) {
       { path: 'width', label: 'Width (px)', control: numberControl({ min: 240, max: 3840, placeholder: cfg.android.width }) },
       { path: 'height', label: 'Height (px)', control: numberControl({ min: 320, max: 3840, placeholder: cfg.android.height }) },
       { path: 'dpi', label: 'Density (dpi)', control: numberControl({ min: 80, max: 640, placeholder: cfg.android.dpi }) },
-      { path: 'fps', label: 'Frames per second', control: numberControl({ min: 5, max: 120, placeholder: cfg.android.fps }) },
+      { path: 'fps', label: 'Frames per second', topic: 'fps', control: numberControl({ min: 5, max: 120, placeholder: cfg.android.fps }) },
       { path: 'use_profile_screen', label: 'Use the device profile’s screen shape', control: checkControl(), modes: ['create'], help: 'Same aspect ratio as the phone, at the farm’s width.' },
     ] },
     { group: 'Resources', items: [
@@ -161,19 +181,20 @@ function fields(options, mode) {
       { path: 'resources.cpuset', label: 'Pin to cores', control: textControl({ placeholder: '0-3 or 8,9' }) },
     ] },
     { group: 'Network', items: [
-      { path: 'network.mode', label: 'Network mode', control: selectControl([['direct', 'Direct (host connection)'], ['vpn', 'VPN (one tunnel per Android)'], ['gateway', 'Shared VPN gateway'], ['proxy', 'HTTP proxy'], ['none', 'None (offline)']], farm(cfg.network.mode)) },
+      { path: 'network.mode', label: 'Network mode', topic: 'network', control: selectControl([['direct', 'Direct (host connection)'], ['vpn', 'VPN (one tunnel per Android)'], ['gateway', 'Shared VPN gateway'], ['proxy', 'HTTP proxy'], ['none', 'None (offline)']], farm(cfg.network.mode)) },
       { path: 'network.vpn_profile', label: 'VPN profile', control: selectControl(options.vpnProfiles.map((p) => [p, p]), `Chosen automatically (${cfg.network.vpn.selection})`),
         help: options.vpnProfiles.length ? 'Used when the mode is VPN.' : 'No profiles yet: import one on the Network page.' },
       { path: 'network.gateway', label: 'Gateway', control: selectControl(gateways.map((g) => [g, g]), cfg.network.gateway ? farm(cfg.network.gateway) : 'Farm default'),
         help: gateways.length ? 'Used when the mode is shared gateway.' : 'No gateways yet: define one on the Network page.' },
       { path: 'network.proxy', label: 'Proxy', control: textControl({ placeholder: cfg.network.proxy || 'host:port' }), help: 'Used when the mode is HTTP proxy.' },
-      { path: 'network.killswitch', label: 'Kill switch', control: triControl(farm(cfg.network.killswitch ? 'on' : 'off')), help: 'Blocks traffic that would leave outside the tunnel.' },
+      { path: 'network.killswitch', label: 'Kill switch', topic: 'killswitch', control: triControl(farm(cfg.network.killswitch ? 'on' : 'off')), help: 'Blocks traffic that would leave outside the tunnel.' },
     ] },
     { group: 'Advanced', items: [
       { path: 'data_volume', label: 'Adopt an existing data volume', control: textControl({ placeholder: 'Docker volume name' }), modes: ['create'], help: 'Use an Android created elsewhere. Count must be 1; its identity is kept.' },
       { path: 'image', label: 'Custom image', control: textControl({ placeholder: 'repository:tag' }), modes: ['create', 'edit'], help: 'Run this exact image instead of the one configured for the version.' },
       { path: 'extra_boot_args', label: 'Extra boot arguments', control: linesControl('androidboot.key=value, one per line'), empty: [] },
-      { path: 'extra_props', label: 'Extra properties', control: propsControl(), empty: {}, modes: ['create', 'edit'] },
+      { path: 'extra_props', label: 'Extra properties', control: propsControl(), empty: {}, merge: true, modes: ['create', 'edit'],
+        help: 'System properties set on this Android after boot. Deleting a line here removes that property again.' },
     ] },
   ];
 }
@@ -203,7 +224,7 @@ export function instanceForm(options, { mode, spec, groups: only }) {
         item.initial = getPath(spec, item.path);
         item.control.write(item.initial);
       }
-      const node = field(item.label, item.control.el, item.help);
+      const node = field(item.label, item.control.el, item.help, { path: item.apiPath || item.path, topic: item.topic });
       if (wide) node.classList.add('wide');
       if (apply) node.append(h('label', { class: 'small muted', for: apply.id }, apply, ' change this'));
       grid.append(node);
@@ -236,6 +257,8 @@ export function instanceForm(options, { mode, spec, groups: only }) {
   function value() {
     const patch = {};
     for (const item of active) {
+      // Letters in a number box: the browser keeps them from us, so say so at the field.
+      if (item.control.el.validity && item.control.el.validity.badInput) throw fieldError(item.apiPath || item.path, 'This is not a number.');
       if (item.virtual) continue;
       const read = item.control.read();
       const cleared = read == null ? (item.empty !== undefined ? item.empty : null) : read;
@@ -243,6 +266,9 @@ export function instanceForm(options, { mode, spec, groups: only }) {
         if (read != null) setPath(patch, item.path, read);
       } else if (mode === 'bulk') {
         if (item.apply.checked) setPath(patch, item.path, cleared);
+      } else if (item.merge) {
+        const changes = mapPatch(item.initial, read);
+        if (changes !== undefined) setPath(patch, item.path, changes);
       } else if (!same(cleared, item.initial ?? (item.empty !== undefined ? item.empty : null))) {
         setPath(patch, item.path, cleared);
       }

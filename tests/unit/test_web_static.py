@@ -49,6 +49,7 @@ CONTRACT = """
 /api/listen /api/listen/{}
 /api/backups /api/backups/farm /api/backups/verify /api/backups/restore /api/backups/download
 /api/events
+/api/approvals /api/approvals/{} /api/approvals/{}/{approve|deny} /api/mcp/info
 """.split()
 CONTRACT_PREFIXES = ("/api/automation/",)          # "expose every public method of the facade 1:1"
 
@@ -268,20 +269,243 @@ def test_mutations_carry_the_csrf_header_and_stay_same_origin():
         assert not re.search(r"(local|session)Storage\.setItem\([^)]*token", read(path), re.I), path.name
 
 
+def _token_blocks() -> list[tuple[str, set[str]]]:
+    tokens = read(WEB / "css" / "tokens.css")
+    return [(selector.strip(), set(re.findall(r"(--[\w-]+)\s*:", body)))
+            for selector, body in re.findall(r"(:root[^{]*)\{([^}]*)\}", tokens)]
+
+
 def test_themes_define_the_same_tokens():
-    base = read(WEB / "css" / "base.css")
-    blocks = re.findall(r"(:root[^{]*)\{([^}]*)\}", base)
-    names = [(selector.strip(), set(re.findall(r"(--[\w-]+)\s*:", body))) for selector, body in blocks]
-    light = next(tokens for selector, tokens in names if selector == ":root")
-    dark = [tokens for selector, tokens in names if "dark" in selector or "not(" in selector]
-    assert len(dark) == 2, "expected a system-dark block and an explicit dark block"
-    colours = {t for t in light if t not in ("--radius", "--gap", "--font", "--mono")}
-    for tokens in dark:
-        assert tokens == colours, f"dark theme differs: {sorted(tokens ^ colours)}"
+    """Dark is the base, light is a complete second theme: the light blocks (system
+    setting, explicit choice) must redefine every colour token and nothing else."""
+    blocks = _token_blocks()
+    base = [tokens for selector, tokens in blocks if selector == ":root"]
+    assert len(base) == 2, "expected a scale block and a dark colour block"
+    scale, dark = base
+    assert not scale & dark, f"defined twice: {sorted(scale & dark)}"
+    light = [tokens for selector, tokens in blocks if "data-theme" in selector]
+    assert len(light) == 2, "expected a system-light block and an explicit light block"
+    for tokens in light:
+        assert tokens == dark, f"light theme differs: {sorted(tokens ^ dark)}"
     used = set()
     for path in CSS:
         used |= set(re.findall(r"var\((--[\w-]+)", read(path)))
-    assert used <= light, f"undefined custom properties: {sorted(used - light)}"
+    assert used <= scale | dark, f"undefined custom properties: {sorted(used - (scale | dark))}"
+
+
+def test_colours_live_in_the_tokens_only():
+    """One place to change a theme: no stylesheet but tokens.css holds a raw colour."""
+    for path in CSS:
+        if path.name == "tokens.css":
+            continue
+        raw = re.findall(r"#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(", read(path))
+        assert raw == [], f"{path.name} has raw colours: {raw[:5]}"
+    names = [p.name for p in CSS]
+    linked = [attrs["href"] for tag, attrs in page().tags if tag == "link" and attrs.get("rel") == "stylesheet"]
+    assert linked[0] == "css/tokens.css", "tokens.css must load first"
+    assert sorted(linked) == sorted(f"css/{name}" for name in names), "every stylesheet is linked, and only those"
+
+
+# ------------------------------------------------------------------ accessibility
+
+def _theme_colours() -> dict[str, dict[str, str]]:
+    tokens = read(WEB / "css" / "tokens.css")
+    bodies = [(sel.strip(), body) for sel, body in re.findall(r"(:root[^{]*)\{([^}]*)\}", tokens)]
+    dark = next(body for sel, body in bodies[1:] if sel == ":root")
+    light = next(body for sel, body in bodies if 'data-theme="light"' in sel)
+    return {name: dict(re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", body)) for name, body in (("dark", dark), ("light", light))}
+
+
+def _rgba(value: str) -> tuple[tuple[float, float, float], float]:
+    value = value.strip()
+    if value.startswith("#"):
+        return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5)), 1.0
+    m = re.match(r"rgb\((\d+) (\d+) (\d+)(?: / ([\d.]+)%)?\)", value)
+    assert m, f"unexpected colour syntax: {value}"
+    return (float(m[1]), float(m[2]), float(m[3])), (float(m[4]) / 100 if m[4] else 1.0)
+
+
+def _over(top: str, under: tuple[float, float, float]) -> tuple[float, float, float]:
+    (r, g, b), a = _rgba(top)
+    return tuple(c * a + u * (1 - a) for c, u in zip((r, g, b), under, strict=True))
+
+
+def _contrast(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    def luminance(colour):
+        parts = [c / 255 for c in colour]
+        parts = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in parts]
+        return 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]
+    hi, lo = sorted((luminance(a), luminance(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_text_colours_meet_wcag_aa_on_every_surface(theme: str):
+    """4.5:1 for every text colour on every surface it is used on, in both themes; state
+    colours also on their own tinted badge; 3:1 for the focus ring."""
+    t = _theme_colours()[theme]
+    page = _rgba(t["--bg"])[0]
+    surfaces = {"bg": page, "surface": _over(t["--surface"], page), "solid": _rgba(t["--surface-solid"])[0],
+                "surface-2": _rgba(t["--surface-2"])[0], "surface-3": _rgba(t["--surface-3"])[0]}
+    low = []
+    for text in ("--text", "--muted", "--faint", "--accent", "--ok", "--warn", "--fail", "--info", "--idle"):
+        for name, surface in surfaces.items():
+            if name == "surface-3" and text not in ("--text", "--muted", "--faint"):
+                continue                      # hover fill: only plain text sits on it
+            got = _contrast(_rgba(t[text])[0], surface)
+            if got < 4.5:
+                low.append((text, name, round(got, 2)))
+    for kind in ("ok", "warn", "fail", "info", "idle"):
+        for name in ("surface", "surface-2"):
+            got = _contrast(_rgba(t[f"--{kind}"])[0], _over(t[f"--{kind}-soft"], surfaces[name]))
+            if got < 4.5:
+                low.append((f"--{kind}", f"its badge on {name}", round(got, 2)))
+    for stop in ("--accent-a", "--accent-b"):
+        got = _contrast(_rgba(t["--accent-text"])[0], _rgba(t[stop])[0])
+        if got < 4.5:
+            low.append(("--accent-text", stop, round(got, 2)))
+    tinted = _over(t["--accent-soft"], surfaces["surface"])
+    for text in ("--text", "--muted"):
+        if _contrast(_rgba(t[text])[0], tinted) < 4.5:
+            low.append((text, "accent-soft", round(_contrast(_rgba(t[text])[0], tinted), 2)))
+    assert low == [], f"{theme}: below 4.5:1: {low}"
+    assert _contrast(_rgba(t["--focus"])[0], page) >= 3 and _contrast(_rgba(t["--focus"])[0], surfaces["solid"]) >= 3
+
+
+
+def test_motion_and_focus_rules_are_present():
+    base = read(WEB / "css" / "base.css")
+    reduced = re.search(r"@media \(prefers-reduced-motion: reduce\) \{(.*?)\n\}", base, re.S)
+    assert reduced, "animations must stop under prefers-reduced-motion"
+    assert "animation: none !important" in reduced.group(1) and "transition: none !important" in reduced.group(1)
+    assert ":focus-visible" in base and "outline: 2px solid var(--focus)" in base
+    for path in CSS:
+        assert not re.search(r"outline:\s*(none|0)\b(?![^}]*:focus-visible)", read(path).replace(
+            ":focus:not(:focus-visible) { outline: none; }", "").replace(".main:focus { outline: none; }", "").replace(
+            ".palette-input input:focus-visible { outline: none; }", "")), f"{path.name} removes a focus ring"
+
+
+def test_icon_only_controls_in_the_page_are_labelled():
+    for tag, attrs in page().tags:
+        if tag == "button" and "icon-only" in (attrs.get("class") or ""):
+            assert attrs.get("aria-label"), f"icon-only button {attrs.get('id')} has no aria-label"
+        if tag == "img":
+            assert "alt" in attrs, "every image states its alt text (empty when decorative)"
+
+
+# -------------------------------------------------------------------------- icons
+
+def icon_names() -> set[str]:
+    source = read(WEB / "js" / "icons.js")
+    start = source.index("const PATHS = {")
+    table = source[start:source.index("\n};", start)]
+    return {quoted or bare for quoted, bare in re.findall(r"^  (?:'([\w-]+)'|(\w+)):", table, re.M)}
+
+
+def test_every_icon_used_is_drawn():
+    known = icon_names()
+    assert len(known) > 40
+    used: dict[str, str] = {}
+    for path in JS:
+        text = read(path)
+        for name in re.findall(r"\bicon\(\s*'([\w-]+)'", text):
+            used.setdefault(name, path.name)
+        # button(label, run, kind, 'icon') / linkButton(...) / emptyState('icon', ...) / panel(.., { icon: '..' })
+        for name in re.findall(r"\bemptyState\(\s*'([\w-]+)'", text) + re.findall(r"\bicon: '([\w-]+)'", text):
+            used.setdefault(name, path.name)
+    for _tag, attrs in page().tags:
+        if attrs.get("data-icon"):
+            used.setdefault(attrs["data-icon"], "index.html")
+    missing = {name: where for name, where in used.items() if name not in known}
+    assert missing == {}, f"icons used but not drawn in icons.js: {missing}"
+    assert "createElementNS" in read(WEB / "js" / "icons.js"), "icons are built as DOM nodes, never parsed from markup"
+
+
+def test_help_topics_exist_and_quote_the_schema():
+    source = read(WEB / "js" / "components" / "help.js")
+    known = {quoted or bare for quoted, bare in re.findall(r"^  (?:'([\w-]+)'|(\w+)): \{", source, re.M)}
+    assert {"rendering", "network", "killswitch", "capacity", "selector"} <= known
+    assert "/api/config/schema" in source, "help text comes from the config schema"
+    for path in JS:
+        for name in re.findall(r"\bhelp\('([\w-]+)'\)", read(path)) + re.findall(r"\btopic: '([\w-]+)'", read(path)):
+            assert name in known, f"{path.name} asks for help topic {name!r}, which help.js does not have"
+
+
+# ---------------------------------------------------------------------- shortcuts
+
+def test_page_shortcuts_are_unique_and_match_the_navigation():
+    keys = [attrs["data-key"] for tag, attrs in page().tags if tag == "a" and attrs.get("data-key")]
+    links = [attrs["href"] for tag, attrs in page().tags if tag == "a" and attrs.get("data-key")]
+    assert len(keys) == len(set(keys)) == len(links) >= 10, "one distinct letter per page"
+    assert all(len(key) == 1 and key.islower() for key in keys)
+    shortcuts = read(WEB / "js" / "components" / "shortcuts.js")
+    assert ".live-surface" in shortcuts and "dialog[open]" in shortcuts, "single keys must not fire while typing or in a dialog"
+
+
+# ------------------------------------------------------------------- double press
+
+def test_one_press_one_action_is_built_in_once():
+    """A double click must not act twice. The guard lives in the element builder (every
+    button and form goes through it), the dialog, and the one function that sends
+    requests; pages do not each reinvent it."""
+    dom = read(WEB / "js" / "dom.js")
+    assert "GUARDED = { button: 'onclick', form: 'onsubmit' }" in dom and "aria-busy" in dom and "aria-disabled" in dom
+    assert "export function busy(" in dom and "export function single(" in dom
+    api = read(WEB / "js" / "api.js")
+    assert "pending.has(key)" in api and "REPEATABLE" in api, "identical changes in flight are sent once; live input may repeat"
+    assert re.search(r"REPEATABLE = /\^\\/api\\/\(input", api), "taps and keys are never de-duplicated"
+    dialog = read(WEB / "js" / "components" / "dialog.js")
+    assert "ARM_MS" in dialog and "if (running ||" in dialog and "? cancel : field).focus()" in dialog
+    # Buttons are built with h(), never with createElement, or they would miss the guard.
+    for path in JS:
+        if path.name in ("dom.js", "icons.js"):
+            continue
+        assert "createElement(" not in read(path).replace("document.createElement('span')", ""), f"{path.name} builds elements past h()"
+    # A handler that fires a request without handing its promise back cannot be guarded.
+    for path in JS:
+        for line in read(path).splitlines():
+            if re.search(r"event\.preventDefault\(\);\s*attempt\(", line):
+                raise AssertionError(f"{path.name}: a submit handler must return its promise: {line.strip()[:80]}")
+
+
+def test_the_approvals_inbox_cannot_be_answered_by_accident():
+    page_js = read(WEB / "js" / "pages" / "approvals.js")
+    # The headline is the daemon's summary; the page never words a request itself.
+    assert "item.summary" in page_js and "approval-summary' }, item.summary)" in page_js
+    # Append only, armed after a delay, a second click inside the card for destructive ones.
+    assert "list.append(slot.el)" in page_js and "prepend" not in page_js and "insertBefore" not in page_js
+    assert "ARM_MS" in page_js and "approval-confirm" in page_js and "dataset: action" in page_js
+    assert ".focus(" not in page_js, "nothing on the inbox takes the keyboard focus by itself"
+    assert "confirmDialog" not in page_js and "openDialog" not in page_js, "the destructive confirmation is inside the card"
+    # No shortcut and no toast answers a request: only the two buttons call these.
+    for path in JS:
+        text = read(path)
+        if path.name not in ("approvals.js",):
+            assert "/approve`" not in text and "/deny`" not in text, f"{path.name} answers approvals"
+    shortcuts = read(WEB / "js" / "components" / "shortcuts.js")
+    assert "approve" not in shortcuts.lower()
+    store = read(WEB / "js" / "approvals.js")
+    assert "data.now - Date.now() / 1000" in store, "time left is counted against the server's clock"
+
+
+# ------------------------------------------------------------------------ wording
+
+def test_no_removed_options_or_private_words():
+    for path in TEXT_FILES:
+        text = read(path)
+        lowered = text.lower()
+        for word in ("bi" + "go", "clau" + "de", "anthro" + "pic", "ham" + "za"):
+            assert word not in lowered, f"{path.name} contains {word!r}"
+    form = read(WEB / "js" / "instance-form.js")
+    for line in form.splitlines():
+        if "device.timezone" in line or "device.geo" in line:
+            assert not re.search(r"\bauto\b", line), f"time zone / mock location no longer take 'auto': {line.strip()[:90]}"
+
+
+def test_capacity_shows_the_assumed_rendering_mode_verbatim():
+    common = read(WEB / "js" / "common.js")
+    assert "estimate.mode)" in common and "estimate.mode_reason" in common
+    assert "estimate.mode ||" not in common, "the mode is shown as the API returns it, with no substitute wording"
 
 
 # --------------------------------------------------------------------------- node
@@ -312,7 +536,7 @@ def test_js_parses(path: Path):
 
 
 _HELPERS = """
-import { parseSelector, selectorOf, bytes, duration, mb } from 'BASE/dom.js';
+import { parseSelector, selectorOf, bytes, duration, mb, single } from 'BASE/dom.js';
 import { diff } from 'BASE/components/form.js';
 import { codecFromAnnexB } from 'BASE/components/live.js';
 import { parseHash } from 'BASE/router.js';
@@ -324,7 +548,11 @@ const fleet = [
 const pick = (s) => [...parseSelector(s, fleet)].sort((a, b) => a - b);
 let bad = '';
 try { parseSelector('nonsense', fleet); } catch (e) { bad = e.message; }
+let runs = 0;
+const twice = await Promise.all([single('k', async () => { runs += 1; return 7; }), single('k', async () => { runs += 1; return 8; })]);
+const again = await single('k', async () => { runs += 1; return 9; });
 console.log(JSON.stringify({
+  once: [twice, again, runs],
   all: pick('all'), running: pick('running'), stopped: pick('stopped'), tag: pick('tag:EU'),
   range: pick('1-3'), reversed: pick('3-1'), single: pick('7'), unknown: pick('9'),
   union: pick('1, 7'), minus: pick('all,!tag:spare,!2'), empty: pick(''), bad,
@@ -350,6 +578,7 @@ def test_pure_helpers_behave(tmp_path: Path):
     result = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     got = json.loads(result.stdout)
+    assert got["once"] == [[7, 7], 9, 2], "the same thing asked twice at once runs once; afterwards it runs again"
     assert got["all"] == [1, 2, 3, 7]
     assert got["running"] == [1, 3] and got["stopped"] == [2, 7]
     assert got["tag"] == [1, 3]

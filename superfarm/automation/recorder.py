@@ -199,7 +199,16 @@ class RecordingSession:
                     raise RecordingError("nothing to type")
                 typed = value
             nodes = self._read()
-            focused = next((n for n in nodes if n["focused"] and n["editable"]), None)
+            if name is None and not nodes:
+                # The check below needs the focused field. Without it this may be a password,
+                # and a literal is saved with the recording: refuse instead of guessing.
+                raise RecordingError(
+                    "the screen could not be read, so it cannot be told whether this is a password field"
+                    + (f" ({self.last_problem})" if self.last_problem else "")
+                    + ". Typed text is saved with the recording: try again, or give the value a name "
+                    "(it is then typed now and only the name is saved).")
+            # password="true" also on a class that is not a text field: toolkits draw their own.
+            focused = next((n for n in nodes if n["focused"] and (n["editable"] or n["password"])), None)
             if name is None and focused is not None and (
                     focused.get("password") or looks_secret(f"{focused.get('id', '')} {focused.get('desc', '')}", words)):
                 raise RecordingError(

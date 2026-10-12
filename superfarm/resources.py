@@ -2,7 +2,9 @@
 templates, helper scripts and the native sources.
 
     deploy/    Docker build contexts, systemd unit templates
-    scripts/   helper programs started by the daemon (camera feeders) or by the operator
+    scripts/   helper programs started by the daemon (camera feeders) or by the operator,
+               one folder per area (files directly in scripts/ are tools for working on a
+               checkout and are not shipped)
     native/    sources, patches and build scripts for the GPU relay, camera HAL and v4l2loopback
 
 They exist in two layouts, and callers must not care which one they are running from:

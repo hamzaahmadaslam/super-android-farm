@@ -10,8 +10,12 @@
 #     the project, and skips kernel modules, kernel limits, groups and systemd;
 #   - every package name the farm knows for that family is resolved against the
 #     distribution's package index;
-#   - the package is imported, `sf version`, the doctor and a host-setup dry run are run,
-#     and the host part of the unit tests.
+#   - the package is imported and `sf version`, `sf doctor` (as JSON and as text; it must
+#     report the container's limits, not crash), `sf host plan`, `sf host capacity` and
+#     `sf host gpus` are run;
+#   - a wheel is built and installed, not editable, into a second environment, and the
+#     shipped files and the doctor are checked from that copy;
+#   - a fast part of the unit tests is run: host, foundation, resources, local commands.
 #
 # What this does NOT prove: anything that needs a real kernel or init system (module
 # loading, sysctl, groups, the systemd units), and kernel header package names.
@@ -59,9 +63,12 @@ for key in "${targets[@]}"; do
   current=$name
   # A container of this exact name can only be the leftover of an interrupted earlier run.
   docker rm -f "$name" >/dev/null 2>&1 || true
+  # In the background and waited for: bash runs a trap only between commands, so with the
+  # container in the foreground an interrupt would be ignored until the container ended.
   timeout "$TIMEOUT" docker run --name "$name" --memory 2g --memory-swap 2g --cpus 4 \
     -v "$REPO:/src:ro" -e SF_INSTALL_NO_SYSTEM=1 "${IMAGE[$key]}" \
-    bash /src/tests/distro/inside.sh > "$log" 2>&1
+    bash /src/tests/distro/inside.sh > "$log" 2>&1 &
+  wait $!
   code=$?
   docker rm -f "$name" >/dev/null 2>&1 || true
   current=""
@@ -70,18 +77,18 @@ for key in "${targets[@]}"; do
 done
 
 echo
-printf '%-8s | %-28s | %-8s | %-8s | %-6s | %-6s | %-6s | %-6s | %-10s\n' \
-  distro release install packages venv import cli doctor unit-tests
+printf '%-8s | %-28s | %-8s | %-8s | %-6s | %-6s | %-6s | %-6s | %-6s | %-10s\n' \
+  distro release install packages venv import cli doctor wheel unit-tests
 for key in "${targets[@]}"; do
   log="$OUT/$key.log"
   col() { local v; v=$(field "$log" "$1" | cut -f1); printf '%s' "${v:--}"; }
-  printf '%-8s | %-28s | %-8s | %-8s | %-6s | %-6s | %-6s | %-6s | %-10s\n' \
+  printf '%-8s | %-28s | %-8s | %-8s | %-6s | %-6s | %-6s | %-6s | %-6s | %-10s\n' \
     "$key" "$(field "$log" distro | cut -f2 | cut -c1-28)" "$(col install)" "$(col packages)" "$(col venv)" \
-    "$(col import)" "$(col cli)" "$(col doctor)" "$(col unit-tests)"
+    "$(col import)" "$(col cli)" "$(col doctor)" "$(col wheel)" "$(col unit-tests)"
 done
 echo
 for key in "${targets[@]}"; do
-  grep $'^SFRESULT\t' "$OUT/$key.log" | awk -F'\t' -v k="$key" '$3 != "ok" || $2 == "packages" || $2 == "doctor" || $2 == "unit-tests" || $2 == "cli" { printf "%-8s %-18s %-5s %s\n", k, $2, $3, $4 }'
+  grep $'^SFRESULT\t' "$OUT/$key.log" | awk -F'\t' -v k="$key" '$3 != "ok" || $2 == "packages" || $2 == "doctor" || $2 == "unit-tests" || $2 == "cli" || $2 == "wheel" { printf "%-8s %-18s %-5s %s\n", k, $2, $3, $4 }'
 done
 echo
 echo "logs: $OUT"

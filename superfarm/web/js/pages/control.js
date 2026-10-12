@@ -3,17 +3,19 @@
 // normalized, so devices of different resolutions get the same gesture.
 
 import { del, get, post } from '../api.js';
-import { button, deviceActions, empty, h264Offered, loadInstances, pageHead } from '../common.js';
-import { liveView } from '../components/live.js';
+import { button, deviceActions, emptyState, h264Offered, linkButton, loadInstances, pageHead, panel, plural } from '../common.js';
+import { deviceKeys, liveView } from '../components/live.js';
 import { selectorBox } from '../components/table.js';
 import { attempt, fail, ok } from '../components/toast.js';
 import { h, parseSelector, replace, scope as newScope, selectorOf } from '../dom.js';
+import { icon } from '../icons.js';
+import { rememberInstances } from '../state.js';
 
 const RUNNING = new Set(['running', 'booted']);
-const NAV = [['Back', 'BACK'], ['Home', 'HOME'], ['Recents', 'APP_SWITCH'], ['Vol −', 'VOLUME_DOWN'], ['Vol +', 'VOLUME_UP'], ['Power', 'POWER']];
 
 export async function render(root, params, scope) {
   let instances = await loadInstances();
+  rememberInstances(instances);
   const [system, windows] = await Promise.all([get('/api/system').catch(() => ({})), get('/api/windows').catch(() => null)]);
   const h264 = h264Offered(system);
   let listening = null;
@@ -34,7 +36,8 @@ export async function render(root, params, scope) {
 
   const broadcast = h('input', { type: 'checkbox', checked: true });
   const large = h('input', { type: 'checkbox' });
-  const chips = h('div', { class: 'row', role: 'group', 'aria-label': 'Running Androids' });
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Running Androids' });
+  const target = h('span', { class: 'badge info', role: 'status' });
   const wall = h('div', { class: 'wall large' });
   const typed = h('input', { type: 'text', class: 'grow', placeholder: 'Text to type on every selected Android', 'aria-label': 'Text to type on every selected Android' });
   const tiles = new Map();            // id -> { el, scope, listen }
@@ -61,7 +64,7 @@ export async function render(root, params, scope) {
       if (on) await del('/api/listen');
       else await post(`/api/listen/${id}`);
       await refreshListen();
-    }, on ? 'Stopped listening.' : `Listening to Android ${id} on the host’s speakers.`), `small${on ? ' primary' : ''}`);
+    }, on ? 'Stopped listening.' : `Listening to Android ${id} on the host’s speakers.`), `small${on ? ' primary' : ''}`, 'volume-up');
   }
 
   function drawWall() {
@@ -85,25 +88,28 @@ export async function render(root, params, scope) {
     for (const [id, tile] of tiles) replace(tile.listen, listenButton(id));
     replace(wall, [...selection].sort((a, b) => a - b).map((id) => tiles.get(id).el));
     if (!selection.size) {
-      replace(wall, empty('Nothing selected', 'Pick the Androids to watch above, or type a selector such as "running" or "tag:eu".'));
+      replace(wall, instances.some((i) => RUNNING.has(i.state))
+        ? emptyState('control', 'Nothing on the wall yet',
+          'Pick the Androids to watch above, or type a selector such as "running" or "tag:eu". Each one you pick shows its live screen here.',
+          button('Show all running', () => model.setSelection(instances.map((i) => i.id)), 'primary', 'control'))
+        : emptyState('device', 'No Android is running', 'The wall shows live screens, and a stopped Android has no screen to show. Start some first.',
+          linkButton('Go to Androids', '#/androids', 'primary', 'devices')));
     }
     wall.className = `wall ${large.checked ? 'large' : ''}`;
+    replace(target, icon('control'), broadcast.checked ? `input goes to ${plural(selection.size, 'Android')}` : 'input goes to the tile you touch');
   }
 
   function drawChips() {
     const running = instances.filter((i) => RUNNING.has(i.state));
     replace(chips, running.map((i) => h('button', {
-      type: 'button', class: 'btn small', 'aria-pressed': String(selection.has(i.id)),
+      type: 'button', class: 'chip', 'aria-pressed': String(selection.has(i.id)),
       onclick: () => {
         const next = new Set(selection);
         next[next.has(i.id) ? 'delete' : 'add'](i.id);
         model.setSelection(next);
       },
-    }, `${i.id} · ${i.name}`)));
-    if (!running.length) {
-      replace(chips, empty('No Android is running', 'Start some first; a stopped Android has no screen to show.',
-        h('a', { class: 'btn primary', href: '#/androids' }, 'Go to Androids')));
-    }
+    }, h('span', { class: 'count' }, `#${i.id}`), i.name)));
+    if (!running.length) replace(chips, h('span', { class: 'muted' }, 'No Android is running.'));
   }
 
   async function refreshListen() {
@@ -113,36 +119,43 @@ export async function render(root, params, scope) {
 
   model.onSelection(() => { drawChips(); drawWall(); });
   large.addEventListener('change', drawWall);
+  broadcast.addEventListener('change', drawWall);
   scope.add(() => { for (const tile of tiles.values()) tile.scope.dispose(); });
 
   const nativeNote = windows && !windows.available.ok ? windows.available.reason : '';
   root.append(
-    pageHead('Control', 'Watch and drive many Androids at once.'),
+    pageHead('Control', 'Watch and drive many Androids at once: with broadcast on, one tap, swipe or typed text goes to every Android on the wall.'),
     h('div', { class: 'stack' },
-      h('div', { class: 'card stack' },
-        h('div', { class: 'toolbar' }, selectorBox(model, () => instances.filter((i) => RUNNING.has(i.state))),
-          button('All running', () => model.setSelection(instances.map((i) => i.id))), button('None', () => model.setSelection([]))),
-        chips),
-      h('div', { class: 'card stack' },
-        h('div', { class: 'row' },
-          h('label', null, broadcast, ' Broadcast: my input on any tile goes to all selected'),
-          h('label', null, large, ' Large tiles')),
-        h('form', { class: 'row', onsubmit: (event) => {
-          event.preventDefault();
-          if (typed.value) send([...selection], 'text', { value: typed.value });
-          typed.value = '';
-        } }, typed, h('button', { type: 'submit', class: 'btn' }, 'Type on all')),
-        h('div', { class: 'row', role: 'group', 'aria-label': 'Device buttons for every selected Android' },
-          NAV.map(([label, name]) => button(label, () => send([...selection], 'key', { name }), 'small'))),
-        h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Setting on all selected:'), deviceActions(() => selectorOf(selection))),
-        h('div', { class: 'row' },
-          button('Open native windows (tiled)', () => attempt(async () => {
-            if (!selection.size) throw new Error('Select at least one Android first.');
-            await post('/api/windows/grid', { ids: [...selection] });
-          }, 'Windows opened on the desktop of the machine that runs the daemon.'), 'small'),
-          button('Close native windows', () => attempt(() => post('/api/windows/close-all'), 'Closed.'), 'small'),
-          nativeNote && h('span', { class: 'small muted' }, `Native windows are not available: ${nativeNote}`)),
-        h('p', { class: 'small muted' }, 'Click a tile and type to send keys; drag to swipe; hold to long-press. "Listen" plays one device’s sound on the host’s speakers.')),
+      panel('On the wall', { icon: 'devices', actions: [
+        button('All running', () => model.setSelection(instances.map((i) => i.id)), 'small'), button('None', () => model.setSelection([]), 'small')] },
+      h('div', { class: 'stack tight' },
+        h('div', { class: 'toolbar' }, selectorBox(model, () => instances.filter((i) => RUNNING.has(i.state)))),
+        chips)),
+      panel('Broadcast', { icon: 'control', actions: target },
+        h('div', { class: 'stack tight' },
+          h('div', { class: 'row' },
+            h('label', null, broadcast, ' Broadcast: my input on any tile goes to all selected'),
+            h('label', null, large, ' Large tiles')),
+          h('form', { class: 'row', onsubmit: (event) => {
+            event.preventDefault();
+            // Nothing to send is said, not swallowed.
+            if (!selection.size) { fail(new Error('Select at least one Android first.')); return; }
+            if (!typed.value) { typed.focus(); return; }
+            send([...selection], 'text', { value: typed.value });
+            typed.value = '';
+          } }, typed, h('button', { type: 'submit', class: 'btn' }, icon('keyboard'), 'Type on all')),
+          h('div', { class: 'row' },
+            deviceKeys((name) => send([...selection], 'key', { name }), { label: 'Device buttons for every selected Android' }),
+            h('span', { class: 'chip-sep', 'aria-hidden': 'true' }),
+            h('span', { class: 'muted small' }, 'Setting on all selected:'), deviceActions(() => selectorOf(selection))),
+          h('div', { class: 'row' },
+            button('Open native windows (tiled)', () => attempt(async () => {
+              if (!selection.size) throw new Error('Select at least one Android first.');
+              await post('/api/windows/grid', { ids: [...selection] });
+            }, 'Windows opened on the desktop of the machine that runs the daemon.'), 'small', 'open'),
+            button('Close native windows', () => attempt(() => post('/api/windows/close-all'), 'Native windows closed.'), 'small'),
+            nativeNote && h('span', { class: 'small muted' }, `Native windows are not available: ${nativeNote}`)),
+          h('p', { class: 'small muted' }, 'Click a tile and type to send keys; drag to swipe; hold to long-press. "Listen" plays one device’s sound on the host’s speakers.'))),
       wall));
 
   drawChips();
@@ -159,7 +172,7 @@ export async function render(root, params, scope) {
       // An Android that stopped leaves the wall; nothing is added behind the operator's back.
       const running = new Set(instances.filter((i) => RUNNING.has(i.state)).map((i) => i.id));
       if ([...selection].some((id) => !running.has(id))) model.setSelection([...selection].filter((id) => running.has(id)));
-      else drawChips();
+      else { drawChips(); if (!selection.size) drawWall(); }
       await refreshListen();
     } catch { /* retried on the next turn */ }
   }, 5000);

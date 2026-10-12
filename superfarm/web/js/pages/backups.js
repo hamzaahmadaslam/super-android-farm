@@ -2,12 +2,13 @@
 // original), back up the farm's settings, and schedule it all.
 
 import { del, get, patch, post, query } from '../api.js';
-import { badge, button, card, empty, field, loadInstances, option, pageHead } from '../common.js';
+import { badge, button, card, emptyState, field, loadInstances, option, pageHead, panel } from '../common.js';
 import { confirmDialog, openDialog } from '../components/dialog.js';
 import { dataTable } from '../components/table.js';
 import { finished } from '../components/tasks.js';
 import { attempt, fail, ok } from '../components/toast.js';
 import { bytes, h, when } from '../dom.js';
+import { icon } from '../icons.js';
 
 export async function render(root, _params, scope) {
   const selector = h('input', { type: 'text', value: 'all', spellcheck: false });
@@ -27,6 +28,7 @@ export async function render(root, _params, scope) {
     const farm = backup.kind === 'farm';
     await openDialog({
       title: `Restore ${backup.name}`,
+      icon: 'backups',
       body: farm ? [
         h('p', null, 'Restores the farm’s settings, Android definitions and automation data. Existing Androids are not overwritten unless forced.'),
         field('Overwrite what already exists', force),
@@ -75,7 +77,7 @@ export async function render(root, _params, scope) {
         }, 'small danger'),
       ] },
     ],
-    empty: empty('No backups yet', 'Back up one or more Androids above. A backup holds the Android’s data, its settings and checksums of every file.'),
+    empty: emptyState('backups', 'No backups yet', 'Back up one or more Androids above. A backup holds the Android’s data, its settings and checksums of every file.'),
   });
 
   async function load() {
@@ -90,20 +92,20 @@ export async function render(root, _params, scope) {
   }
 
   root.append(
-    pageHead('Backups', 'Restoring as a new Android never touches the original.'),
+    pageHead('Backups', 'The safety net: back up Androids and the farm\u2019s settings, verify, and restore. Restoring as a new Android never touches the original.'),
     h('div', { class: 'stack' },
       h('div', { class: 'grid cols-2' },
         card('Back up Androids',
           h('form', { class: 'stack', onsubmit: (event) => {
             event.preventDefault();
-            attempt(async () => {
+            return attempt(async () => {
               const data = await post('/api/backups', { selector: selector.value.trim() });
               await finished(data.task);
               await load();
             });
           } },
-          field('Androids (selector)', selector, 'With backup.stop_for_backup on (the default), a running Android is stopped while its data is copied and started again.'),
-          h('div', { class: 'row' }, h('button', { type: 'submit', class: 'btn primary' }, 'Back up now')))),
+          field('Androids (selector)', selector, 'With backup.stop_for_backup on (the default), a running Android is stopped while its data is copied and started again.', { topic: 'backup-stop' }),
+          h('div', { class: 'row' }, h('button', { type: 'submit', class: 'btn primary' }, icon('backups'), 'Back up now')))),
         card('Back up the farm’s settings',
           h('p', { class: 'small muted' }, 'Config, every Android’s definition, automation data and the list of VPN profile names. Small and quick.'),
           field('Include secrets (VPN credentials, tokens). Such a backup cannot be downloaded here.', secrets),
@@ -115,7 +117,7 @@ export async function render(root, _params, scope) {
       card('Schedule',
         h('form', { class: 'fields', onsubmit: (event) => {
           event.preventDefault();
-          attempt(async () => {
+          return attempt(async () => {
             await patch('/api/config', { patch: { backup: { schedule: cron.value.trim(), schedule_selector: cronSelector.value.trim() || 'all', keep: Number(keep.value) || 0 } } });
             await load();
           }, 'Schedule saved.');
@@ -125,9 +127,7 @@ export async function render(root, _params, scope) {
         field('Backups kept per Android', keep, '0 keeps all.'),
         h('div', { class: 'field' }, h('span', null, '\u00a0'), h('button', { type: 'submit', class: 'btn' }, 'Save schedule'))),
         scheduleNote),
-      h('section', { class: 'card' },
-        h('div', { class: 'card-head' }, h('h2', null, 'Existing backups'), button('Refresh', () => attempt(load), 'small')),
-        where, table.el)));
+      panel('Existing backups', { icon: 'backups', actions: button('Refresh', () => attempt(load), 'small', 'restart') }, where, table.el)));
 
   const [, config] = await Promise.all([load(), get('/api/config')]);
   cron.value = config.config.backup.schedule;

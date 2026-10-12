@@ -217,7 +217,9 @@ def candidates_at(nodes: list[dict], x: int, y: int, limit: int = 4) -> list[dic
     """
     out: list[dict] = []
     for node in sorted((n for n in nodes if visible(n) and _contains(n, x, y) and _named(n)), key=_area):
-        entry = {k: node[k] for k in ("id", "text", "desc", "cls", "path") if node.get(k)}
+        entry = {k: node[k] for k in ("id", "desc", "cls", "path") if node.get(k)}
+        if node.get("text") and not node["editable"] and not node["password"]:
+            entry["text"] = node["text"]      # what a field holds is content a person typed, not identity
         if entry not in out:
             out.append(entry)
         if len(out) >= limit:

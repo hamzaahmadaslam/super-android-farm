@@ -15,6 +15,7 @@ export const hooks = {
   unauthorized() {},
   task() {},
   confirmOverCapacity: async () => false,
+  link() {},                  // link(true | false): did the daemon answer the last request
 };
 
 export class ApiError extends Error {
@@ -55,7 +56,35 @@ async function parse(response) {
   return response.text();
 }
 
-export async function request(method, path, body, { quiet = false } = {}) {
+// A change asked for twice at the same moment is sent once: while a POST, PUT, PATCH or
+// DELETE is on its way, the identical request gets the same answer instead of a second
+// trip to the daemon. This backs up the busy state of the controls (dom.js): whatever
+// control fires it, a double press cannot create two Androids or start two backups.
+// Live input is the exception, because there a repeat is the point (a double tap, the
+// same key twice).
+const REPEATABLE = /^\/api\/(input\/|automation\/record\/[^/]+\/(?!stop$|cancel$))/;
+const pending = new Map();
+
+function signature(method, path, body) {
+  if (method === 'GET' || REPEATABLE.test(path)) return '';
+  if (body instanceof FormData) {
+    const fields = [...body.entries()].map(([name, value]) => (value instanceof File
+      ? `${name}=file:${value.name}:${value.size}:${value.lastModified}` : `${name}=${value}`));
+    return `${method} ${path} ${fields.join('&')}`;
+  }
+  return `${method} ${path} ${body === undefined ? '' : JSON.stringify(body)}`;
+}
+
+export function request(method, path, body, options = {}) {
+  const key = signature(method, path, body);
+  if (!key) return send(method, path, body, options);
+  if (pending.has(key)) return pending.get(key);
+  const promise = send(method, path, body, options).finally(() => pending.delete(key));
+  pending.set(key, promise);
+  return promise;
+}
+
+async function send(method, path, body, { quiet = false } = {}) {
   const headers = { Accept: 'application/json' };
   const init = { method, headers, credentials: 'same-origin' };
   if (method !== 'GET') headers['X-SF-CSRF'] = csrf();
@@ -68,8 +97,10 @@ export async function request(method, path, body, { quiet = false } = {}) {
   try {
     response = await fetch(path, init);
   } catch {
+    hooks.link(false);
     throw new ApiError(0, { code: 'unreachable', message: 'The farm daemon did not answer. Is `sf serve` still running?' });
   }
+  hooks.link(true);
   const data = await parse(response);
   if (response.ok) {
     if (data && typeof data === 'object' && data.task && !quiet) hooks.task(data.task);

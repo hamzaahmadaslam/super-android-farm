@@ -1,6 +1,5 @@
 """Finding the shipped deploy/, scripts/ and native/ folders in a checkout and in an installed wheel."""
 import re
-from pathlib import Path
 
 import pytest
 
@@ -88,11 +87,19 @@ def test_every_shipped_folder_is_listed_as_wheel_data():
             # Build output folders of the native scripts (.gitignore: native/**/out, native/**/work).
             if path.is_file() and not {"__pycache__", "out", "work"} & set(rel.parts):
                 on_disk.add(str(rel.parent))
+    # Files directly in scripts/ are tools for working on a checkout (the quality gate); they
+    # are not part of an install. What the program itself starts lives one level down.
+    on_disk.discard("scripts")
     assert on_disk == set(listed)
     assert str(resources.INSTALLED_SUBDIR) == "share/superfarm-resources"
 
 
-def test_wheel_data_files_have_no_subfolder_only_entries():
-    # A folder that holds only folders needs no entry; one that holds files and is missing is caught above.
-    assert not [p for p in (CHECKOUT / "deploy").iterdir() if p.is_file()]
-    assert not [p for p in map(Path, ("scripts", "native")) if [f for f in (CHECKOUT / p).iterdir() if f.is_file()]]
+def test_shipped_files_live_in_subfolders():
+    """A file directly in deploy/ or native/ would have no data-files entry (see above), and
+    nothing the package looks up may sit directly in scripts/, which is not shipped."""
+    for top in ("deploy", "native"):
+        assert not [p.name for p in (CHECKOUT / top).iterdir() if p.is_file()], top
+    looked_up = set()
+    for source in (CHECKOUT / "superfarm").rglob("*.py"):
+        looked_up |= set(re.findall(r'resource_path\(\s*"scripts"\s*,\s*"([^"]+)"\s*\)', source.read_text()))
+    assert not looked_up, f"resource_path names a file directly in scripts/, which a wheel does not carry: {looked_up}"

@@ -35,6 +35,8 @@ dependencies = [
 [project.optional-dependencies]
 # Persistent UI-hierarchy reader for screens that never go idle (video, animations).
 u2 = ["uiautomator2>=3.2"]
+# MCP server (`sf mcp`): lets MCP-enabled AI assistants see and operate the farm. See docs/MCP.md.
+mcp = ["mcp>=2.0,<3"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27", "ruff>=0.5"]
 
 [project.scripts]

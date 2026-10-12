@@ -1,0 +1,185 @@
+/* Design tokens: every colour, size, radius, shadow, layer and timing of the panel.
+   Nothing else in the stylesheets holds a raw colour, so a theme is changed here only.
+
+   Dark is the base ("mission control"); light is a complete second theme. The page
+   follows the system setting unless the operator picked a theme (data-theme on <html>). */
+
+/* Scale: the same in both themes. */
+:root {
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 22px;
+  --r-full: 999px;
+
+  --control-h: 32px;
+  --control-h-sm: 26px;
+  --topbar-h: 56px;
+  --nav-w: 228px;
+  --nav-w-rail: 64px;
+  --content-max: 1560px;
+
+  --z-sticky: 10;
+  --z-topbar: 20;
+  --z-nav: 30;
+  --z-drawer: 40;
+  --z-bulk: 45;
+  --z-toast: 70;
+
+  --t-fast: 120ms;
+  --t-med: 200ms;
+  --t-slow: 420ms;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+}
+
+/* Colour: dark. */
+:root {
+  --bg: #090c13;
+  --bg-tint-a: rgb(34 211 238 / 7%);
+  --bg-tint-b: rgb(139 124 255 / 8%);
+  --surface: rgb(21 26 38 / 74%);
+  --surface-solid: #141926;
+  --surface-2: #1a2131;
+  --surface-3: #232c40;
+  --overlay: rgb(17 21 31 / 88%);
+  --border: rgb(150 166 200 / 15%);
+  --border-strong: rgb(150 166 200 / 30%);
+  --text: #e9edf5;
+  --muted: #a3aec2;
+  --faint: #8c97ad;
+  --accent: #35d6dd;
+  --accent-2: #9c93ff;
+  --accent-a: #22d3ee;
+  --accent-b: #8f95ff;
+  --accent-text: #05121b;
+  --accent-soft: rgb(53 214 221 / 13%);
+  --accent-line: rgb(53 214 221 / 45%);
+  --ok: #45dc9c;
+  --ok-soft: rgb(69 220 156 / 13%);
+  --warn: #f6bd55;
+  --warn-soft: rgb(246 189 85 / 13%);
+  --fail: #ff7a85;
+  --fail-soft: rgb(255 122 133 / 14%);
+  --info: #78b2ff;
+  --info-soft: rgb(120 178 255 / 14%);
+  --idle: #8f9bb1;
+  --idle-soft: rgb(143 155 177 / 14%);
+  --focus: #7fdcff;
+  --scrim: rgb(3 5 10 / 62%);
+  --screen: #000000;
+  --bezel: #05070c;
+  --bezel-edge: rgb(150 166 200 / 26%);
+  --on-screen: #ffffff;
+  --on-screen-bg: rgb(0 0 0 / 62%);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 35%);
+  --shadow-2: 0 2px 6px rgb(0 0 0 / 30%), 0 12px 28px rgb(0 0 0 / 32%);
+  --shadow-3: 0 8px 24px rgb(0 0 0 / 45%), 0 28px 64px rgb(0 0 0 / 50%);
+  --glow: 0 0 0 1px rgb(53 214 221 / 35%), 0 6px 22px rgb(53 214 221 / 16%);
+  color-scheme: dark;
+}
+
+/* Colour: light, when the system asks for it and the operator did not choose dark. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f2f4f9;
+    --bg-tint-a: rgb(14 116 144 / 7%);
+    --bg-tint-b: rgb(91 75 214 / 6%);
+    --surface: rgb(255 255 255 / 84%);
+    --surface-solid: #ffffff;
+    --surface-2: #eef1f7;
+    --surface-3: #e2e7f1;
+    --overlay: rgb(255 255 255 / 92%);
+    --border: rgb(20 30 55 / 12%);
+    --border-strong: rgb(20 30 55 / 26%);
+    --text: #101624;
+    --muted: #4a5568;
+    --faint: #5b667a;
+    --accent: #0a6c80;
+    --accent-2: #5546cf;
+    --accent-a: #0b7b93;
+    --accent-b: #5b4bd6;
+    --accent-text: #ffffff;
+    --accent-soft: rgb(10 108 128 / 10%);
+    --accent-line: rgb(10 108 128 / 45%);
+    --ok: #0b6e45;
+    --ok-soft: rgb(11 110 69 / 11%);
+    --warn: #875300;
+    --warn-soft: rgb(190 120 0 / 14%);
+    --fail: #b8222c;
+    --fail-soft: rgb(184 34 44 / 10%);
+    --info: #1a57b3;
+    --info-soft: rgb(26 87 179 / 10%);
+    --idle: #556076;
+    --idle-soft: rgb(85 96 118 / 11%);
+    --focus: #1d4ed8;
+    --scrim: rgb(16 22 36 / 38%);
+    --screen: #000000;
+    --bezel: #171b26;
+    --bezel-edge: rgb(20 30 55 / 30%);
+    --on-screen: #ffffff;
+    --on-screen-bg: rgb(0 0 0 / 62%);
+    --shadow-1: 0 1px 2px rgb(16 22 36 / 8%);
+    --shadow-2: 0 1px 3px rgb(16 22 36 / 8%), 0 10px 24px rgb(16 22 36 / 9%);
+    --shadow-3: 0 6px 18px rgb(16 22 36 / 14%), 0 24px 56px rgb(16 22 36 / 18%);
+    --glow: 0 0 0 1px rgb(10 108 128 / 35%), 0 6px 20px rgb(10 108 128 / 14%);
+    color-scheme: light;
+  }
+}
+
+/* Colour: light, chosen by the operator. */
+:root[data-theme="light"] {
+  --bg: #f2f4f9;
+  --bg-tint-a: rgb(14 116 144 / 7%);
+  --bg-tint-b: rgb(91 75 214 / 6%);
+  --surface: rgb(255 255 255 / 84%);
+  --surface-solid: #ffffff;
+  --surface-2: #eef1f7;
+  --surface-3: #e2e7f1;
+  --overlay: rgb(255 255 255 / 92%);
+  --border: rgb(20 30 55 / 12%);
+  --border-strong: rgb(20 30 55 / 26%);
+  --text: #101624;
+  --muted: #4a5568;
+  --faint: #5b667a;
+  --accent: #0a6c80;
+  --accent-2: #5546cf;
+  --accent-a: #0b7b93;
+  --accent-b: #5b4bd6;
+  --accent-text: #ffffff;
+  --accent-soft: rgb(10 108 128 / 10%);
+  --accent-line: rgb(10 108 128 / 45%);
+  --ok: #0b6e45;
+  --ok-soft: rgb(11 110 69 / 11%);
+  --warn: #875300;
+  --warn-soft: rgb(190 120 0 / 14%);
+  --fail: #b8222c;
+  --fail-soft: rgb(184 34 44 / 10%);
+  --info: #1a57b3;
+  --info-soft: rgb(26 87 179 / 10%);
+  --idle: #556076;
+  --idle-soft: rgb(85 96 118 / 11%);
+  --focus: #1d4ed8;
+  --scrim: rgb(16 22 36 / 38%);
+  --screen: #000000;
+  --bezel: #171b26;
+  --bezel-edge: rgb(20 30 55 / 30%);
+  --on-screen: #ffffff;
+  --on-screen-bg: rgb(0 0 0 / 62%);
+  --shadow-1: 0 1px 2px rgb(16 22 36 / 8%);
+  --shadow-2: 0 1px 3px rgb(16 22 36 / 8%), 0 10px 24px rgb(16 22 36 / 9%);
+  --shadow-3: 0 6px 18px rgb(16 22 36 / 14%), 0 24px 56px rgb(16 22 36 / 18%);
+  --glow: 0 0 0 1px rgb(10 108 128 / 35%), 0 6px 20px rgb(10 108 128 / 14%);
+  color-scheme: light;
+}

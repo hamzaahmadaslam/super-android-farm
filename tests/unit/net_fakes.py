@@ -6,6 +6,9 @@ process, so the tests exercise the real argument building and output parsing.
 from __future__ import annotations
 
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from superfarm.config import Config
 from superfarm.core.docker import Docker
@@ -74,6 +77,22 @@ def env_of(args: list[str]) -> dict[str, str]:
     return dict(v.split("=", 1) for v in option_values(args, "-e"))
 
 
+def at_once(*calls):
+    """Run the calls at the same moment, each in its own thread (an operator pressing a button
+    twice, a bulk start). Returns their results in order; an exception is returned, not raised."""
+    gate = threading.Barrier(len(calls))
+
+    def one(call):
+        gate.wait(timeout=10)
+        try:
+            return call()
+        except Exception as e:  # noqa: BLE001 - the caller asserts on it
+            return e
+
+    with ThreadPoolExecutor(len(calls)) as pool:
+        return list(pool.map(one, calls))
+
+
 class FakeDocker(Docker):
     """Records every CLI call and answers from simple in-memory state."""
 
@@ -86,10 +105,14 @@ class FakeDocker(Docker):
         self.networks: dict[str, dict] = {}        # name -> inspect-style dict
         self.exec_output: dict[str, Result] = {}   # container -> answer of any `docker exec`
         self.build_fails = False
+        self.delay = 0.0                           # seconds every call takes: lets concurrent callers interleave
+        self.start_fails = ""                      # Docker's message when a container cannot be started
 
     def run(self, argv, *, timeout=120, check=True, input=None, binary=False) -> Result:  # noqa: A002
         argv = [str(a) for a in argv]
         self.calls.append(argv)
+        if self.delay:
+            time.sleep(self.delay)
         res = self._answer(argv)
         if check and not res.ok:
             from superfarm.util.proc import CommandError
@@ -122,6 +145,8 @@ class FakeDocker(Docker):
         if a[:2] == ["network", "ls"]:
             return Result(0, "\n".join(self.networks) + "\n", "")
         if a[:2] == ["network", "create"]:
+            if a[-1] in self.networks:
+                return Result(1, "", f"Error response from daemon: network with name {a[-1]} already exists")
             labels = dict(v.split("=", 1) for v in option_values(a, "--label"))
             subnet = a[a.index("--subnet") + 1] if "--subnet" in a else f"172.{18 + len(self.networks)}.0.0/16"
             bridge = a[a.index("--gateway") + 1] if "--gateway" in a else subnet.rsplit(".", 2)[0] + ".0.1"
@@ -148,10 +173,17 @@ class FakeDocker(Docker):
             return Result(0, json.dumps([{"State": {"Status": "running" if c["running"] else "exited", "ExitCode": c.get("exit", 0), "Error": ""}}]), "")
         if a[:2] == ["run", "-d"]:
             name = a[a.index("--name") + 1]
+            if name in self.containers:
+                return Result(125, "", f'docker: Error response from daemon: Conflict. The container name "/{name}" '
+                                       "is already in use by container \"cid\". You have to remove (or rename) that container "
+                                       "to be able to reuse that name.")
             labels = dict(v.split("=", 1) for v in option_values(a, "--label"))
-            self.containers[name] = {"labels": labels, "running": True, "args": a[2:]}
-            return Result(0, "cid\n", "")
+            # As with the real CLI, a container that cannot be started stays behind, created.
+            self.containers[name] = {"labels": labels, "running": not self.start_fails, "args": a[2:]}
+            return Result(125, "", self.start_fails) if self.start_fails else Result(0, "cid\n", "")
         if a[0] == "start":
+            if self.start_fails:
+                return Result(1, "", self.start_fails)
             self.containers[a[-1]]["running"] = True
             return Result(0, "", "")
         if a[0] == "rm":

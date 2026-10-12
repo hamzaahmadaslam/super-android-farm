@@ -381,7 +381,7 @@ def test_enforced_capacity_refuses_a_bulk_start_that_does_not_fit(tmp_path):
         a.client.post("/api/instances", json={"count": 3})
         r = a.client.post("/api/instances/bulk", json={"action": "start", "selector": "all"})
         assert r.status_code == 409 and "about 2 more fit" in r.json()["error"]["message"]
-        assert a.client.post("/api/instances/bulk", json={"action": "start", "selector": "1-2"}).status_code == 202
+        a.wait(a.client.post("/api/instances/bulk", json={"action": "start", "selector": "1-2"}))
         # stop and delete are never a capacity question
         assert a.client.post("/api/instances/bulk", json={"action": "stop", "selector": "all"}).status_code == 202
 

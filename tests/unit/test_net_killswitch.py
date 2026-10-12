@@ -1,5 +1,6 @@
 """The kill switch: settings handed to the sidecar, the rule set its script generates for
 every mode (run with the host's `sh`, nothing is loaded), and the judgement of live rules."""
+import os
 import shutil
 import subprocess
 
@@ -15,12 +16,17 @@ SCRIPT = REPO_DIR / "deploy" / "docker" / "net" / "killswitch.sh"
 LAN = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10")
 
 
-def generate(tmp_path, **env) -> tuple[list[str], list[str]]:
-    """The IPv4 and IPv6 rule sets `killswitch.sh init` would load for this configuration."""
+def write_env(tmp_path, **env) -> None:
+    """The settings file the entrypoint leaves for killswitch.sh."""
     values = {"SF_MODE": "vpn", "SF_KILLSWITCH": "1", "SF_ALLOW_LAN": "0", "SF_DNS": "1.1.1.1,8.8.8.8", "SF_IPV6": "0",
               "SF_ADB_PORT": "5555", "SF_ADB_FROM": "gateway", "WAN_IF": "eth0", "WAN_GW": "172.17.0.1", "GW_IF": "",
               "TUN_MATCH": "tun+", **env}
     (tmp_path / "env").write_text("".join(f"{k}='{v}'\n" for k, v in values.items()))
+
+
+def generate(tmp_path, **env) -> tuple[list[str], list[str]]:
+    """The IPv4 and IPv6 rule sets `killswitch.sh init` would load for this configuration."""
+    write_env(tmp_path, **env)
     out = subprocess.run(["sh", str(SCRIPT), "print"], env={"SF_RUN": str(tmp_path), "PATH": "/usr/bin:/bin"},
                          capture_output=True, text=True, timeout=20)
     assert out.returncode == 0, out.stderr
@@ -164,6 +170,65 @@ def test_garbage_resolvers_never_reach_a_rule(tmp_path):
     v4, _ = generate(tmp_path, SF_MODE="direct", SF_DNS="1.1.1.1,999.1.1.1,8.8.8.8;reboot,a.b.c.d,1.2.3")
     dns = [r for r in v4 if "--dport 53" in r]
     assert len(dns) == 2 and all("-d 1.1.1.1 " in r for r in dns)
+
+
+# ------------------------------------------------------------------ loading and checking
+
+def in_a_sidecar(tmp_path, command: str, *, ip6tables_works: bool = True, policy6: str = "DROP", **env):
+    """Run `killswitch.sh <command>` the way a sidecar with network.ipv6 off sees the world:
+    IPv6 switched off by sysctl (all/disable_ipv6 reads 1) on a kernel that has IPv6. The
+    firewall tools are stand-ins: the restore commands keep what they are given in
+    loaded4/loaded6, the listing commands answer with a DROP policy (`policy6` for IPv6)."""
+    write_env(tmp_path, **env)
+    tools = tmp_path / "bin"
+    tools.mkdir(exist_ok=True)
+    stubs = {
+        "iptables-restore": 'cat >"$SF_RUN/loaded4"',
+        "ip6tables-restore": 'cat >"$SF_RUN/loaded6"' if ip6tables_works else 'echo "ip6tables-restore: no IPv6 netfilter" >&2; exit 1',
+        "iptables": '[ "$1" = -S ] && echo "-P $2 DROP"; exit 0',
+        "ip6tables": f'[ "$1" = -S ] && echo "-P $2 {policy6}"; exit 0',
+        "cat": f'[ "$*" = /proc/sys/net/ipv6/conf/all/disable_ipv6 ] && {{ echo 1; exit 0; }}; exec {shutil.which("cat")} "$@"',
+    }
+    for name, body in stubs.items():
+        (tools / name).write_text(f"#!/bin/sh\n{body}\n")
+        (tools / name).chmod(0o755)
+    return subprocess.run(["sh", str(SCRIPT), command], env={"SF_RUN": str(tmp_path), "PATH": f"{tools}:/usr/bin:/bin"},
+                          capture_output=True, text=True, timeout=20)
+
+
+needs_ipv6_kernel = pytest.mark.skipif(not os.path.exists("/proc/net/if_inet6"),
+                                       reason="this kernel has no IPv6: there is nothing to filter and the script says so")
+
+
+@needs_sh
+@pytest.mark.parametrize("mode", ["vpn", "none"])
+def test_init_loads_the_ipv6_default_deny_even_though_ipv6_is_switched_off(tmp_path, mode):
+    out = in_a_sidecar(tmp_path, "init", SF_MODE=mode)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert (tmp_path / "loaded6").read_text().splitlines() == [
+        "*filter", ":INPUT DROP [0:0]", ":FORWARD DROP [0:0]", ":OUTPUT DROP [0:0]",
+        "-A INPUT -i lo -j ACCEPT", "-A OUTPUT -o lo -j ACCEPT", "COMMIT"]
+    assert ":OUTPUT DROP [0:0]" in (tmp_path / "loaded4").read_text()
+
+
+@needs_sh
+@needs_ipv6_kernel
+@pytest.mark.parametrize("mode", ["vpn", "none"])
+def test_init_fails_closed_when_the_ipv6_rules_cannot_be_loaded(tmp_path, mode):
+    """IPv6 switched off by sysctl is not IPv6 being absent: Android can switch it back on,
+    so a sidecar without IPv6 rules must not come up as ready."""
+    out = in_a_sidecar(tmp_path, "init", SF_MODE=mode, ip6tables_works=False)
+    assert out.returncode == 1, out.stdout
+    assert "ERROR: cannot load IPv6 rules" in out.stdout and "no IPv6 netfilter" in out.stdout
+    assert "continuing" not in out.stdout
+    assert ":OUTPUT DROP [0:0]" in (tmp_path / "loaded4").read_text(), "IPv4 stays closed while it fails"
+
+
+@needs_sh
+@needs_ipv6_kernel
+def test_check_verifies_the_ipv6_policy_even_though_ipv6_is_switched_off(tmp_path):
+    assert in_a_sidecar(tmp_path, "check").returncode == 0
+    assert in_a_sidecar(tmp_path, "check", policy6="ACCEPT").returncode == 1, "an open IPv6 policy went unnoticed"
 
 
 # ------------------------------------------------------------------ judging live rules

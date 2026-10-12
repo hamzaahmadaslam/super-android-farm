@@ -3,7 +3,7 @@
 // answer devices that need attention.
 
 import { del, get, patch, post } from '../api.js';
-import { badge, button, card, empty, field, loadInstances, option, pageHead } from '../common.js';
+import { badge, button, card, emptyState, field, loadInstances, option, pageHead } from '../common.js';
 import { confirmDialog, openDialog } from '../components/dialog.js';
 import { liveView } from '../components/live.js';
 import { dataTable } from '../components/table.js';
@@ -11,10 +11,12 @@ import { tabs } from '../components/tabs.js';
 import { finished } from '../components/tasks.js';
 import { attempt, fail, ok } from '../components/toast.js';
 import { duration, h, replace, scope as newScope, when } from '../dom.js';
+import { icon } from '../icons.js';
 import { flowsTab, runDialog, valuesTab } from './automation-data.js';
 
 const API = '/api/automation';
 const RUNNING = new Set(['running', 'booted']);
+const empty = (title, hint, ...actions) => emptyState('automation', title, hint, ...actions);
 
 // ------------------------------------------------------------------- record
 function recordTab(panel, scope) {
@@ -91,7 +93,7 @@ function recordTab(panel, scope) {
       const s = await get(base);
       replace(status,
         h('p', null, badge(s.active ? 'info' : '', s.active ? 'recording' : 'stopped'), ` ${s.steps} step(s), ${duration(s.seconds)} into "${s.dataset}"`),
-        s.last_problem && h('div', { class: 'banner warn' }, s.last_problem),
+        s.last_problem && h('div', { class: 'banner warn' }, icon('alert'), h('div', { class: 'grow' }, s.last_problem)),
         h('ol', { class: 'steps small', start: Math.max(1, s.steps - s.preview.length + 1) }, s.preview.map((line) => h('li', null, line))));
     };
     const record = (action, body) => post(`${base}/${action}`, body).then(refresh, (error) => { fail(error); });
@@ -111,7 +113,7 @@ function recordTab(panel, scope) {
       return result;
     }, (result) => result.summary || message);
     replace(stage, h('div', { class: 'split' },
-      liveView(id, own, { send, label: instance ? instance.name : `Android ${id}`, aspect: instance && instance.screen && [instance.screen.width, instance.screen.height] }),
+      liveView(id, own, { send, frame: true, label: instance ? instance.name : `Android ${id}`, aspect: instance && instance.screen && [instance.screen.width, instance.screen.height] }),
       h('div', { class: 'stack' },
         h('p', { class: 'muted' }, 'Do the task on the screen to the left. Each tap is recorded with the element it landed on, so the program finds that element again on any device.'),
         h('div', { class: 'row' },
@@ -123,7 +125,7 @@ function recordTab(panel, scope) {
         h('div', { class: 'row' },
           button('Stop and save', () => end('stop', 'Recording saved.'), 'primary'),
           button('Discard', async () => {
-            if (await confirmDialog({ title: 'Discard this recording?', message: 'The steps recorded so far are thrown away.', confirm: 'Discard', danger: true })) end('cancel', 'Recording discarded.');
+            if (await confirmDialog({ title: 'Discard this recording?', message: 'The steps recorded so far are thrown away.', confirm: 'Discard', danger: true })) await end('cancel', 'Recording discarded.');
           }, 'danger')),
         status)));
     refresh().catch(() => {});
@@ -132,14 +134,14 @@ function recordTab(panel, scope) {
   function startForm() {
     return h('form', { class: 'toolbar', onsubmit: (event) => {
       event.preventDefault();
-      attempt(async () => {
+      return attempt(async () => {
         if (!pickDataset.value) throw new Error('Create a dataset first.');
         if (!pickDevice.value) throw new Error('Start an Android first: recording needs a running device.');
         const id = Number(pickDevice.value);
         await post(`${API}/record/start`, { dataset: pickDataset.value, id });
         session(id, instances.find((i) => i.id === id));
       });
-    } }, pickDataset, pickDevice, h('button', { type: 'submit', class: 'btn primary' }, 'Start recording'));
+    } }, pickDataset, pickDevice, h('button', { type: 'submit', class: 'btn primary' }, icon('record'), 'Start recording'));
   }
 
   let instances = [];
@@ -149,7 +151,7 @@ function recordTab(panel, scope) {
       h('div', { class: 'card-head' }, h('h2', null, 'Datasets')),
       h('form', { class: 'toolbar', onsubmit: (event) => {
         event.preventDefault();
-        attempt(async () => {
+        return attempt(async () => {
           await post(`${API}/datasets`, { name: name.value.trim(), package: pkg.value.trim() });
           name.value = '';
           await load();
@@ -245,9 +247,9 @@ async function runsTab(panel, scope) {
   panel.append(h('div', { class: 'stack' },
     card('Start a run', h('form', { class: 'toolbar', onsubmit: (event) => {
       event.preventDefault();
-      if (!target.value) { fail('There is nothing to run yet: write a flow or train a program.'); return; }
+      if (!target.value) { fail('There is nothing to run yet: write a flow or train a program.'); return undefined; }
       const chosen = names[kind.value].find((n) => n.id === target.value);
-      runDialog(kind.value, target.value, chosen ? chosen.values : []).then(load);
+      return runDialog(kind.value, target.value, chosen ? chosen.values : []).then(load);
     } }, kind, target, h('button', { type: 'submit', class: 'btn primary' }, 'Run…'))),
     box));
 
@@ -294,7 +296,7 @@ async function schedulesTab(panel) {
   panel.append(h('div', { class: 'stack' },
     card('Add a schedule', h('form', { class: 'fields', onsubmit: (event) => {
       event.preventDefault();
-      attempt(async () => {
+      return attempt(async () => {
         await post(`${API}/schedules`, {
           name: f.name.value.trim(), kind: f.kind.value, target: f.target.value.trim(), selector: f.selector.value.trim(),
           cron: f.cron.value.trim(), every: f.cron.value.trim() ? 0 : Math.round(Number(f.every.value || 0) * 60),
@@ -319,5 +321,5 @@ export async function render(root, params, scope) {
     { id: 'runs', label: 'Runs', render: runsTab },
     { id: 'schedules', label: 'Schedules', render: schedulesTab },
   ], { active: params[0] || 'record', parent: scope, onChange: (id) => history.replaceState(null, '', `#/automation/${id}`) });
-  root.append(pageHead('Automation', 'Works with any app: nothing here is specific to one.'), view.el);
+  root.append(pageHead('Automation', 'Record a task on a live screen, train a program from a few recordings or write a flow by hand, then run it on any selection. Works with any app.'), view.el);
 }

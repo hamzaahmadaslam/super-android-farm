@@ -266,6 +266,14 @@ def test_quiet_token_prints_only_the_token(home, capsys):
     assert run.err == "" and len(run.out.strip().split()) == 1
 
 
+def test_token_says_what_it_is_worth_without_touching_stdout(home, capsys):
+    run = run_sf(capsys, "token")
+    assert "equivalent to root on this machine" in run.err
+    assert run.out == (home.secrets / "api-token").read_text()          # `$(sf token)` still gets the token alone
+    rotated = run_sf(capsys, "token", "--rotate")
+    assert "signs every browser out" in rotated.err and "stay signed in" not in rotated.err
+
+
 # ------------------------------------------------------------------ doctor / host
 
 def test_doctor_reports_checks_and_fails_on_a_failed_one(home, capsys, monkeypatch):
@@ -405,6 +413,20 @@ def test_host_capacity_and_gpus_render_the_modules_results(home, capsys, monkeyp
     assert "RAM" in run.out and "CPU" in run.out
     data = run_sf(capsys, "--json", "host", "capacity").json
     assert data["binding"] in ("ram", "cpu") and data["workload"] == "video"
+
+
+def test_host_capacity_reads_the_farm_home_the_command_was_given(home, capsys, monkeypatch, tmp_path):
+    # The estimate looks for the NVIDIA runtime in the farm home. Left to itself it takes the
+    # home from the environment, which is not the farm of `--home` (or of the user behind sudo).
+    from superfarm.host import capacity, gpu
+    monkeypatch.setattr(gpu, "detect_gpus", lambda *a, **k: [])
+    seen, real = [], capacity.estimate
+    monkeypatch.setattr(capacity, "estimate", lambda *a, **k: (seen.append(k.get("paths")), real(*a, **k))[1])
+    other = tmp_path / "second-farm"
+    assert run_sf(capsys, "--home", str(other), "--json", "host", "capacity").code == 0
+    assert seen[-1] is not None and seen[-1].home == other
+    assert run_sf(capsys, "--json", "host", "capacity").code == 0
+    assert seen[-1].home == home.home
 
 
 def test_host_sign_module_status_needs_no_root_and_signing_goes_through_sudo(home, capsys, monkeypatch):

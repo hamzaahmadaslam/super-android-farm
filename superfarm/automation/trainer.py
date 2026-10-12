@@ -218,7 +218,8 @@ def describe_for_model(steps: list[ProgramStep], total_recordings: int, forbidde
             entry["types"] = ("a secret value" if looks_secret(step.dynamic, words)
                               else f"the value named {step.dynamic}")
         elif step.kind == "type":
-            entry["types"] = "text (withheld)" if secret_field else (step.text or "")[:60]
+            # No selector: the field was never identified, so nothing says it was not a password.
+            entry["types"] = "text (withheld)" if secret_field or not step.selector else (step.text or "")[:60]
         if step.key:
             entry["key"] = step.key
         if step.package:

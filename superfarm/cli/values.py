@@ -8,6 +8,8 @@ word on validity stays with the model's own validation.
     network.mode=vpn            a field of a nested model
     tags=eu,test                a list: comma separated ("" or [] empties it)
     extra_props.ro.foo=bar      a dict entry: everything after the field name is the key
+    extra_props=                a whole dict emptied ("" or {}), sent as null: a patch merges
+                                dicts entry by entry, so an empty one would change nothing
     gpu_mode=default            an optional field back to "follow the farm default"
 """
 from __future__ import annotations
@@ -164,12 +166,30 @@ def parse_assignment(model: type[BaseModel], assignment: str) -> dict:
     if _is_model(annotation) and not raw.strip().startswith("{"):
         raise KeyValueError(f"{key} is a group of settings; set one of: "
                           f"{', '.join(keys_of(annotation, key + '.'))}")
+    if get_origin(annotation) is dict and raw.strip() in ("", "{}"):
+        return nest(path, None)                 # in a patch, null is what removes a whole map
     return nest(path, coerce(annotation, raw, optional=optional, key=key))
+
+
+def _empties_and_fills(a: dict, b: dict) -> bool:
+    """Does one patch remove a map (null) that the other puts entries into?"""
+    for key in a.keys() & b.keys():
+        x, y = a[key], b[key]
+        if isinstance(x, dict) and isinstance(y, dict):
+            if _empties_and_fills(x, y):
+                return True
+        elif (x is None and isinstance(y, dict)) or (y is None and isinstance(x, dict)):
+            return True
+    return False
 
 
 def parse_assignments(model: type[BaseModel], assignments: list[str]) -> dict:
     """Several `key=value` -> one nested patch. A key given twice keeps the last value."""
     patch: dict = {}
     for item in assignments:
-        patch = merge(patch, parse_assignment(model, item))
+        one = parse_assignment(model, item)
+        if _empties_and_fills(patch, one):
+            raise KeyValueError(f"{item.partition('=')[0].strip()}: a map cannot be emptied and given entries by one "
+                                "patch (the entries would be merged into what is there). Do it in two commands")
+        patch = merge(patch, one)
     return patch

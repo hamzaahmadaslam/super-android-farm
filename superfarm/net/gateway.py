@@ -36,6 +36,7 @@ from ..config import Config
 from ..core.docker import Docker
 from ..core.models import Names
 from ..paths import Paths
+from ..util.files import locked
 from . import sidecar, vpn
 # Not `from . import status`: the package re-exports the function status(), which hides the module.
 from .status import interpret, read_report
@@ -266,7 +267,8 @@ def ensure(docker: Docker, config: Config, paths: Paths, name: str) -> dict:
     cfg = _config(config, name)
     prefix = config.docker.name_prefix
     container = Names.gateway(prefix, name)
-    with _lock:
+    # The file covers what the lock in memory cannot: a second farm process on the same home.
+    with _lock, locked(paths.run / "gateways"):
         _require_docker(docker)
         ensure_uplink(docker, config)
         subnet = _ensure_network(docker, config, name)

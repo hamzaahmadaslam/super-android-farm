@@ -357,7 +357,8 @@ class Camera:
         }
 
     def sources(self) -> list[dict]:
-        """What can be played: the media library's files, and the live ingest."""
+        """What can be played: the media library's files, and the live ingest. The ingest's
+        `key` is the name OBS must be given, not a secret: the listener does not check it."""
         out: list[dict] = []
         if self.paths.media.is_dir():
             for path in sorted(self.paths.media.iterdir(), key=lambda p: p.name.lower()):

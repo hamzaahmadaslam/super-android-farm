@@ -1,11 +1,13 @@
-// Tabs following the WAI-ARIA pattern: arrow keys move between tabs, only the active
-// tab is in the tab order, and each panel is rendered when it is first shown.
+// Tabs following the WAI-ARIA pattern: arrow keys move between tabs (Home and End jump
+// to the first and last), only the active tab is in the tab order, and each panel is
+// rendered when it is first shown.
 
 import { h, replace, scope, uid } from '../dom.js';
 
 // items: [{ id, label, render(panel, scope) }]. Returns { el, show(id) }.
 // Each panel gets its own scope so its timers stop when another tab is opened.
-export function tabs(items, { active, onChange, parent } = {}) {
+// `vertical` lists the tabs down the side: the right shape when there are many.
+export function tabs(items, { active, onChange, parent, vertical = false, label } = {}) {
   const base = uid('tab');
   const panel = h('div', { role: 'tabpanel', tabindex: '0' });
   let inner = null;
@@ -13,13 +15,17 @@ export function tabs(items, { active, onChange, parent } = {}) {
     type: 'button', role: 'tab', id: `${base}-${item.id}`, 'aria-selected': 'false', tabindex: '-1',
     onclick: () => show(item.id, true),
   }, item.label));
-  const list = h('div', { class: 'tabs', role: 'tablist' }, buttons);
+  const list = h('div', { class: 'tabs', role: 'tablist', 'aria-orientation': vertical ? 'vertical' : null, 'aria-label': label }, buttons);
   list.addEventListener('keydown', (event) => {
     const index = buttons.indexOf(document.activeElement);
-    const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
-    if (index < 0 || !step) return;
+    if (index < 0) return;
+    const to = {
+      ArrowRight: index + 1, ArrowLeft: index - 1, ArrowDown: vertical ? index + 1 : undefined, ArrowUp: vertical ? index - 1 : undefined,
+      Home: 0, End: buttons.length - 1,
+    }[event.key];
+    if (to === undefined) return;
     event.preventDefault();
-    const next = buttons[(index + step + buttons.length) % buttons.length];
+    const next = buttons[(to + buttons.length) % buttons.length];
     next.focus();
     next.click();
   });
@@ -43,5 +49,5 @@ export function tabs(items, { active, onChange, parent } = {}) {
 
   if (parent) parent.add(() => inner && inner.dispose());
   show(active);
-  return { el: h('div', null, list, panel), show };
+  return { el: h('div', { class: vertical ? 'tabs-side' : '' }, list, panel), show };
 }

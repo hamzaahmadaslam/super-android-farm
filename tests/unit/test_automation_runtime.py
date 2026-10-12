@@ -477,6 +477,31 @@ def test_a_model_cannot_tap_what_is_on_the_never_tap_list():
     assert any("recovery refused" in line and "never-tap" in line for line in result["log"])
 
 
+def test_a_model_cannot_reach_a_never_tap_element_with_the_keyboard(tmp_path):
+    # TAB moves the focus and ENTER presses what has it: a tap without a tap, which the
+    # never-tap check never sees. A recovery only ever needs to get out of something.
+    dev = device("form")
+    model = FakeModel({"analysis": "walk the focus to the big button", "actions": [
+        {"type": "key", "name": "tab"}, {"type": "key", "name": "tab"}, {"type": "key", "name": "enter"}]})
+    step = ProgramStep(id="p000", kind="tap", selector={"id": "vanished"})
+    run = ProgramRun(program(step), dev, config(stop_on_unknown_screen=False), model=model, never_tap=NEVER)
+    result = run.run()
+    assert result["state"] == "failed" and not dev.acted and dev.did("key") == []
+    # A fix remembered before this rule is not replayed either.
+    from superfarm.automation.memory import dhash
+    memory = FixMemory(tmp_path)
+    again = device("form")
+    memory.remember(package="com.example.app", dhash=dhash(again.image),
+                    actions=[{"type": "key", "name": "tab"}, {"type": "key", "name": "enter"}])
+    result = ProgramRun(program(step), again, config(stop_on_unknown_screen=False), memory=memory, never_tap=NEVER).run()
+    assert result["state"] == "failed" and again.did("key") == []
+    # Getting out of something is still allowed.
+    out = device("form")
+    leave = FakeModel({"analysis": "close it", "actions": [{"type": "key", "name": "back"}]})
+    ProgramRun(program(step), out, config(stop_on_unknown_screen=False), model=leave, never_tap=NEVER).run()
+    assert ("key", "back") in out.did("key")
+
+
 def test_a_model_that_asks_for_a_person_or_fails_gets_one():
     from superfarm.automation.llm import LlmError
     for reply in ({"analysis": "captcha", "actions": [], "needs_human": True}, LlmError("server down")):

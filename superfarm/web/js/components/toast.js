@@ -1,16 +1,24 @@
 // Short results in the corner. The container is an aria-live region (see index.html),
-// so screen readers announce them without moving focus.
+// so screen readers announce them without moving focus. Each says what happened in
+// plain words; nothing here can be undone from a toast, so none pretends it can.
 
 import { h } from '../dom.js';
+import { icon } from '../icons.js';
+
+const ICON = { ok: 'check', warn: 'alert', fail: 'alert', info: 'info' };
+const MOST = 5;
 
 export function toast(message, kind = 'info', { action, timeout } = {}) {
   const host = document.getElementById('toasts');
   const close = () => el.remove();
-  const el = h('div', { class: `toast ${kind}` },
+  const el = h('div', { class: `toast glass ${kind}` },
+    icon(ICON[kind] || 'info'),
     h('div', { class: 'grow' }, message),
     action && h('button', { class: 'btn small', type: 'button', onclick: () => { close(); action.run(); } }, action.label),
-    h('button', { class: 'btn small ghost', type: 'button', 'aria-label': 'Dismiss', onclick: close }, '×'));
+    h('button', { class: 'btn small ghost icon-only', type: 'button', 'aria-label': 'Dismiss', title: 'Dismiss', onclick: close }, icon('x')));
   host.append(el);
+  // A burst of results must not bury the page: the oldest give way.
+  while (host.children.length > MOST) host.firstElementChild.remove();
   // Errors stay until dismissed: they usually carry the one line the operator needs to read.
   const ms = timeout ?? (kind === 'fail' ? 0 : 5000);
   if (ms) setTimeout(close, ms);

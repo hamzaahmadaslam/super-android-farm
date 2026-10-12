@@ -126,6 +126,9 @@ def test_set_resolves_the_selector_like_the_daemon_and_patches_each(home, stub, 
     assert stub.calls("PATCH")[0].json == {"patch": {"fps": 30, "network": {"mode": "none"}, "tags": ["a", "b"]},
                                            "force": False}
     assert run.code == 0 and "2 ok, 0 failed" in run.out
+    # An empty value empties a whole map, which in a patch is null.
+    run_sf(capsys, "set", "3", "extra_props=")
+    assert stub.calls("PATCH")[-1].json == {"patch": {"extra_props": None}, "force": False}
 
 
 @pytest.mark.parametrize("selector, expected", [("all", [1, 2, 3, 10]), ("stopped", [2, 10]), ("2-9", [2, 3]),
@@ -518,6 +521,44 @@ def test_backup_restore_as_new_and_over(home, stub, capsys, monkeypatch):
     assert run.code == 0 and "Replace everything Android 3 holds" in run.err and len(stub.requests) == before
     run_sf(capsys, "backup", "restore", "android-3/20250101-040000", "--over", "3", "--yes", "--no-wait")
     assert stub.requests[-1].json == {"archive": "android-3/20250101-040000", "id": 3, "force": True}
+
+
+def test_backup_restore_of_farm_settings_says_what_was_not_taken(home, stub, capsys):
+    name = "farm/20250101-050000"
+    output = {"restored": ["instances/7/instance.yaml"], "instances": [7], "own": False, "missing_vpn_profiles": ["eu.ovpn"],
+              "adjusted": ["Android 7: autostart switched off"],
+              "skipped": ["config.yaml (made by another farm: restore with `restore_config` to take it)"]}
+    stub.on("POST", "/api/backups/restore", (202, {"task": task(state="queued")}))
+    stub.on("GET", "/api/tasks/t1", {"task": task(state="done", output=output, kind="backup.restore-farm")})
+    run = run_sf(capsys, "backup", "restore", name, "--wait")
+    assert stub.calls("POST", "/api/backups/restore")[-1].json == {"archive": name}      # nothing is chosen for the operator
+    assert run.code == 0 and "restored 1 file(s); Androids: 7" in run.out
+    assert "changed: Android 7: autostart switched off" in run.out
+    assert "not restored: config.yaml (made by another farm" in run.out
+    assert "--trust" in run.err and "--restore-config" in run.err and "eu.ovpn" in run.err
+    assert "new Android" not in run.err                                                   # that is the other kind of backup
+    # One of the farm's own: nothing to explain.
+    stub.on("GET", "/api/tasks/t1", {"task": task(state="done", output={**output, "own": True, "adjusted": [], "skipped": []})})
+    assert "--trust" not in run_sf(capsys, "backup", "restore", name, "--wait").err
+    # The choices are for farm backups only, and an Android's options are not for them.
+    before = len(stub.requests)
+    assert run_sf(capsys, "backup", "restore", "android-3/20250101-040000", "--trust").code == 2
+    assert run_sf(capsys, "backup", "restore", name, "--over", "3", "--yes").code == 2
+    assert len(stub.requests) == before
+
+
+def test_backup_restore_sends_each_explicit_choice_for_a_farm_backup(home, stub, capsys, contract):
+    name = "farm/20250101-050000"
+    stub.on("POST", "/api/backups/restore", (202, {"task": task(state="queued")}))
+    run_sf(capsys, "backup", "restore", name, "--trust", "--no-wait")
+    assert stub.requests[-1].json == {"archive": name, "trust": True}
+    run_sf(capsys, "backup", "restore", name, "--restore-config", "--restore-secrets", "--no-wait")
+    assert stub.requests[-1].json == {"archive": name, "restore_config": True, "restore_secrets": True}
+    fields = set(contract.schemas["Restore"]["properties"]) if contract is not None else set()
+    if contract is not None and not {"trust", "restore_config", "restore_secrets"} <= fields:
+        # What the CLI sends is checked above. The route's request model is the API's side.
+        stub.requests.clear()
+        pytest.skip("POST /api/backups/restore does not declare trust / restore_config / restore_secrets yet")
 
 
 def test_backup_list_verify_prune_farm(home, stub, capsys):

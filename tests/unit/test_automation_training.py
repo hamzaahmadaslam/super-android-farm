@@ -247,6 +247,9 @@ def test_secrets_are_described_but_never_sent_to_a_model():
     assert "hunter2" not in str(described)
     assert described[0]["types"] == "text (withheld)" and described[1]["types"] == "a secret value"
     assert described[2]["types"] == "hello" and described[3]["types"] == "the value named greeting"
+    # Typed where the field was never identified: nothing says it was not a password.
+    [blind] = describe_for_model([ProgramStep(id="p004", kind="type", text="hunter2", seen_in=1)], 1, WORDS)
+    assert blind["types"] == "text (withheld)"
     model = FakeModel({"steps": []})
     apply_annotation(Program(slug="s", steps=steps), model, 1, WORDS)
     assert "hunter2" not in model.asked[0]

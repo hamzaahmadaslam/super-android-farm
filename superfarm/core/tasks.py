@@ -4,6 +4,15 @@ Anything that touches more than one Android, or takes more than a moment, runs a
 Task so the panel and CLI can show progress, per-device outcomes and cancel it. The
 central rule of fleet operations lives in run_on_instances(): every device is
 independent, and one that fails or stalls never holds up the others.
+
+One operator request per Android at a time. Work that changes what an Android is doing
+(start, stop, restart, recreate, delete, a manual backup, a restore over it) is submitted
+`exclusive`. While such a task has not finished with an Android, another exclusive request
+that names it is refused as a whole with TaskBusy, which names the task; it is neither
+queued nor joined to the first. A double click therefore gives one task and one refusal
+pointing at it, never the same work twice. An Android the task has already finished with
+is free again while the task goes on with the others. busy_targets() is the one place
+that answers "who is busy with what".
 """
 from __future__ import annotations
 
@@ -23,6 +32,21 @@ class Cancelled(Exception):
     pass
 
 
+class TaskBusy(RuntimeError):
+    """Refused: an active task is still working on some of the same Androids. `task` is
+    that task and `ids` are the Androids both name."""
+
+    def __init__(self, task: Task, ids: list[int]):
+        ids = sorted(ids)
+        if len(ids) == 1:
+            which, it = f"Android {ids[0]} is", "it"
+        else:
+            which, it = f"Androids {', '.join(str(i) for i in ids[:10])}{', ...' if len(ids) > 10 else ''} are", "them"
+        super().__init__(f"{which} busy: task {task.id} ({task.title}) is still working on {it}. "
+                         "Wait for it to finish, or cancel it")
+        self.task, self.ids = task, ids
+
+
 @dataclass
 class Task:
     id: str
@@ -39,6 +63,7 @@ class Task:
     created: float = field(default_factory=time.time)
     started: float = 0.0
     finished: float = 0.0
+    exclusive: bool = False        # holds its targets against other exclusive tasks (see the module text)
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -99,9 +124,19 @@ class TaskManager:
         self._lock = threading.Lock()
         self._keep = keep
 
-    def submit(self, kind: str, title: str, fn: Callable[[Task], Any], *, targets: list[int] | None = None) -> Task:
+    def submit(self, kind: str, title: str, fn: Callable[[Task], Any], *, targets: list[int] | None = None,
+               exclusive: bool = False) -> Task:
+        """Queue work. With `exclusive`, TaskBusy is raised (and nothing is queued) when an
+        active exclusive task is still working on one of `targets`; checking and queueing
+        are one step, so of two requests at the same moment exactly one gets through."""
         with self._lock:
-            task = Task(id=f"t{next(self._ids)}", kind=kind, title=title, targets=list(targets or []))
+            if exclusive:
+                busy = self._busy()
+                held = [i for i in targets or [] if i in busy]
+                if held:
+                    raise TaskBusy(busy[held[0]], [i for i in held if busy[i] is busy[held[0]]])
+            task = Task(id=f"t{next(self._ids)}", kind=kind, title=title, targets=list(targets or []),
+                        exclusive=exclusive)
             self._tasks[task.id] = task
             self._order.append(task.id)
             for old in self._order[:-self._keep]:
@@ -115,7 +150,8 @@ class TaskManager:
         task.state, task.started = "running", time.time()
         try:
             task.output = fn(task)
-            task.state = "cancelled" if task.cancelled else "done"
+            with task._lock:        # with cancel(): a cancel that was accepted is never followed by "done"
+                task.state = "cancelled" if task.cancelled else "done"
         except Cancelled:
             task.state = "cancelled"
         except Exception as e:  # noqa: BLE001 - a task must never take the pool thread down
@@ -136,17 +172,28 @@ class TaskManager:
 
     def cancel(self, task_id: str) -> bool:
         task = self._tasks.get(task_id)
-        if not task or not task.active:
+        if not task:
             return False
-        task._cancel.set()
-        return True
+        with task._lock:
+            if not task.active:
+                return False
+            task._cancel.set()
+            return True
 
-    def busy_targets(self, kinds: tuple[str, ...] | None = None) -> set[int]:
-        """Instances that an active task is working on (to refuse conflicting operations)."""
-        out: set[int] = set()
-        for t in self.list(limit=10_000, active_only=True):
-            if kinds is None or t.kind in kinds:
-                out.update(t.targets)
+    def busy_targets(self) -> dict[int, Task]:
+        """Androids an active exclusive task has not finished with yet, each with that task
+        (to refuse conflicting operations and to say who holds what)."""
+        with self._lock:
+            return self._busy()
+
+    def _busy(self) -> dict[int, Task]:
+        out: dict[int, Task] = {}
+        for task_id in self._order:
+            task = self._tasks[task_id]
+            if task.exclusive and task.active:
+                with task._lock:
+                    done = set(task.results)
+                out.update((i, task) for i in task.targets if i not in done)
         return out
 
     def wait(self, task: Task, timeout: float | None = None) -> Task:
@@ -163,12 +210,13 @@ class TaskManager:
 
 def run_on_instances(manager: TaskManager, kind: str, title: str, ids: list[int],
                      fn: Callable[[int, Task], str | None], *, concurrency: int = 4,
-                     stagger: float = 0.0) -> Task:
+                     stagger: float = 0.0, exclusive: bool = False) -> Task:
     """Run fn(instance_id, task) for every id, `concurrency` at a time.
 
     fn returns a short detail string on success and raises on failure. Each instance's
     outcome is recorded on its own; the task as a whole only fails if fn could not be
-    scheduled at all. Cancelling stops instances that have not started yet.
+    scheduled at all. Cancelling stops instances that have not started yet. `exclusive`
+    as for TaskManager.submit().
     """
     ids = [int(i) for i in ids]
 
@@ -199,4 +247,4 @@ def run_on_instances(manager: TaskManager, kind: str, title: str, ids: list[int]
         task.step(f"{ok} of {len(ids)} succeeded")
         return {"ok": ok, "failed": len(ids) - ok}
 
-    return manager.submit(kind, title, work, targets=ids)
+    return manager.submit(kind, title, work, targets=ids, exclusive=exclusive)

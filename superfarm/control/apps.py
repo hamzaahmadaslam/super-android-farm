@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import os
 import re
 import subprocess
 import tarfile
 import time
+import zlib
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -365,10 +367,14 @@ def _sha256(path: Path) -> str:
 
 def inspect_data_archive(archive: Path, package: str) -> dict:
     """Check that an archive holds exactly one app's data folder and nothing that could be
-    written elsewhere when it is unpacked as root inside an Android. Returns {members, uid}."""
+    written elsewhere when it is unpacked as root inside an Android. Returns {members, uid}.
+
+    The archive is read the way the restore reads it (gzip, then tar) and to its very end,
+    where gzip checks its checksum: what passes here can be unpacked. A restore deletes the
+    app's data first, so "cannot be read" has to be found out now, not then."""
     members, uid, links = 0, None, set()
     try:
-        with tarfile.open(archive, "r|*") as tar:
+        with gzip.open(archive, "rb") as packed, tarfile.open(fileobj=packed, mode="r|") as tar:
             for m in tar:
                 members += 1
                 if members > _MAX_TAR_MEMBERS:
@@ -388,7 +394,9 @@ def inspect_data_archive(archive: Path, package: str) -> dict:
                     raise ValueError(f"archive entry {m.name[:120]!r} hard-links outside {package}/")
                 if m.name.rstrip("/") == package:
                     uid = m.uid
-    except (tarfile.TarError, EOFError, OSError) as e:
+            while packed.read(_COPY_CHUNK):
+                pass
+    except (tarfile.TarError, EOFError, OSError, zlib.error) as e:
         raise ValueError(f"{archive.name} is not a readable app-data archive: {e}") from None
     if not members:
         raise ValueError(f"{archive.name} is empty")
@@ -540,13 +548,25 @@ class Apps:
         if stop:
             stop_app(reach(self.mgr, id), package)
         folder = self._backup_root() / package
-        folder.mkdir(parents=True, exist_ok=True)
+        # Owner-only, like a whole-Android backup: the archive is the app's logins and databases.
+        for private in (folder.parent, folder):
+            private.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(private, 0o700)              # also one made before this was the rule
         dest = folder / f"{package}_android{int(id)}_{time.strftime('%Y%m%d-%H%M%S')}.tar.gz"
         tmp = dest.with_name("." + dest.name + ".part")
         errlog = dest.with_name("." + dest.name + ".err")
         deadline = time.monotonic() + _DATA_BACKUP_TIMEOUT
         try:
-            with open(errlog, "wb") as err, gzip.open(tmp, "wb", compresslevel=3) as out:
+            # 0600 from the first byte; tmp.replace(dest) below keeps the mode. Exclusive: the
+            # name is to the second, so a file that is already there is the same backup asked
+            # for twice (a double click), and two writers into one file would ruin both.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            raise RuntimeError(f"a backup of {package} on Android {id} is being written right now; "
+                               "wait for it to finish") from None
+        try:
+            with (os.fdopen(fd, "wb") as raw, open(errlog, "wb") as err,
+                  gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=3) as out):
                 p = spawn([self.docker.binary, "exec", container, "tar", "-C", "/data/data", "--numeric-owner",
                            "-cf", "-", package], stdout=subprocess.PIPE, stderr=err)
                 try:
@@ -568,7 +588,7 @@ class Apps:
                         "members": found["members"], "uid": found["uid"], "version_code": installed_version(adb, package),
                         "android_sdk": adb.getprop("ro.build.version.sdk"), "superfarm": __version__}
             tmp.replace(dest)
-            write_json(_manifest_path(dest), manifest)
+            write_json(_manifest_path(dest), manifest, mode=0o600)
         finally:
             tmp.unlink(missing_ok=True)
             errlog.unlink(missing_ok=True)

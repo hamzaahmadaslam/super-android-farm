@@ -60,7 +60,7 @@ def test_capacity_is_over_below_the_memory_guard(farm):
 
 
 def test_a_failing_estimate_never_blocks(farm):
-    def broken(config, running):
+    def broken(config, paths, running):
         raise OSError("no sysfs here")
 
     farm.mgr.backends.capacity_estimate = broken
@@ -157,6 +157,112 @@ def test_restarting_a_running_android_is_never_refused_halfway(tmp_path):
         farm.close()
 
 
+def touched(farm, id: int, since: int) -> list[tuple]:
+    """Docker calls that change a container of Android `id`, made after call number `since`."""
+    names = (farm.names(id).android, farm.names(id).net)
+    return [c for c in farm.docker.calls[since:] if c[0] in ("stop", "rm", "start", "create") and c[1] in names]
+
+
+@pytest.mark.parametrize("action", ["restart", "recreate"])
+def test_a_refused_restart_or_recreate_of_a_stopped_android_touches_nothing(tmp_path, action):
+    farm = enforcing(tmp_path)
+    try:
+        farm.mgr.create(count=2)
+        farm.capacity_max = 1
+        farm.mgr.start(2)
+        farm.mgr.stop(2)
+        farm.mgr.start(1)                                     # the one place is taken
+        mark = len(farm.docker.calls)
+        with pytest.raises(OverCapacity, match="not starting Android 2"):
+            getattr(farm.mgr, action)(2)
+        assert touched(farm, 2, mark) == []                   # its stopped containers are still there, as they were
+        assert farm.docker.exists(farm.names(2).android) and farm.docker.exists(farm.names(2).net)
+        assert farm.docker.running(farm.names(1).android)
+        assert getattr(farm.mgr, action)(2, force=True)["state"] == "booted"
+    finally:
+        farm.close()
+
+
+def test_a_refused_restart_leaves_a_half_up_android_as_it_was(tmp_path):
+    """Android gone, its network container still up: the refusal must not take that down either."""
+    farm = enforcing(tmp_path)
+    try:
+        farm.mgr.create(count=2)
+        farm.capacity_max = 1
+        farm.mgr.start(2)
+        farm.docker.containers[farm.names(2).android]["running"] = False      # the Android died on its own
+        farm.mgr.start(1)
+        mark = len(farm.docker.calls)
+        with pytest.raises(OverCapacity):
+            farm.mgr.restart(2)
+        assert touched(farm, 2, mark) == [] and farm.docker.running(farm.names(2).net)
+    finally:
+        farm.close()
+
+
+@pytest.mark.parametrize("action", ["restart", "recreate"])
+def test_bulk_restart_and_recreate_never_leave_a_running_android_stopped(tmp_path, action):
+    """The reported defect: with enforce_capacity on and no force, a bulk restart stopped
+    each Android and then refused to start it again."""
+    farm = enforcing(tmp_path, start_concurrency=1)
+    try:
+        farm.mgr.create(count=3)
+        farm.capacity_max = 2
+        farm.mgr.start(1)
+        farm.mgr.start(2)
+        farm.mgr.start(3, force=True)
+        farm.mgr.stop(3)                                      # 1 and 2 run and fill the machine; 3 is stopped
+        farm.mem_mb = 900                                     # and memory is below the guard as well
+        mark = len(farm.docker.calls)
+        task = farm.tasks.wait(farm.mgr.bulk(action, "all"), timeout=20)
+        assert task.results[1]["ok"] and task.results[2]["ok"], task.results
+        assert not task.results[3]["ok"] and "OverCapacity" in task.results[3]["detail"]
+        assert farm.mgr.select("running") == [1, 2] and touched(farm, 3, mark) == []
+        assert [farm.mgr.status(i)["state"] for i in (1, 2, 3)] == ["booted", "booted", "error"]
+        task = farm.tasks.wait(farm.mgr.bulk(action, "all", force=True), timeout=20)
+        assert all(r["ok"] for r in task.results.values()) and farm.mgr.select("running") == [1, 2, 3]
+    finally:
+        farm.close()
+
+
+def test_a_restart_refused_for_any_reason_leaves_a_running_android_running(farm):
+    """Capacity is one refusal among several; none of them may come after the stop."""
+    farm.mgr.create()
+    farm.mgr.start(1)
+    android = farm.names(1).android
+
+    def no_such_card(r, config, paths, *, counts=None):
+        raise ValueError("gpu mode 'nvidia' needs an NVIDIA card, and this machine has none")
+
+    choose, farm.mgr.backends.gpu_choose = farm.mgr.backends.gpu_choose, no_such_card
+    for action in (farm.mgr.restart, farm.mgr.recreate):
+        mark = len(farm.docker.calls)
+        with pytest.raises(InstanceError, match="this machine has none"):
+            action(1)
+        assert touched(farm, 1, mark) == [] and farm.docker.running(android)
+    farm.mgr.backends.gpu_choose = choose
+
+    def no_profile(r, config, paths, store, docker):
+        raise ValueError("no VPN profile is free")
+
+    farm.mgr.backends.sidecar_run_args = no_profile
+    mark = len(farm.docker.calls)
+    with pytest.raises(InstanceError, match="no VPN profile is free"):
+        farm.mgr.restart(1)
+    assert touched(farm, 1, mark) == [] and farm.docker.running(android)
+
+
+def test_restart_of_a_running_android_stops_and_starts_the_pair_in_order(farm):
+    farm.mgr.create()
+    farm.mgr.start(1)
+    names = farm.names(1)
+    mark = len(farm.docker.calls)
+    result = farm.mgr.restart(1)
+    assert result["state"] == "booted" and result["recreated"] is False and result["already_running"] is False
+    assert touched(farm, 1, mark) == [("stop", names.android), ("stop", names.net), ("start", names.net),
+                                     ("start", names.android)]
+
+
 def test_enforced_memory_guard_refuses_and_force_overrides(tmp_path):
     farm = enforcing(tmp_path)
     try:
@@ -234,16 +340,31 @@ def test_bulk_start_reports_each_refusal_and_force_reaches_every_android(tmp_pat
 
 # ------------------------------------------------------------------------- real estimate
 
-def test_default_estimate_uses_the_host_module_and_caches_the_card_list(monkeypatch):
+def test_default_estimate_uses_the_host_module_and_caches_the_card_list(monkeypatch, tmp_path):
     from superfarm.config import Config
     from superfarm.host import capacity, gpu
+    from superfarm.paths import Paths
 
     calls = []
+    paths = Paths(tmp_path / "home")
     monkeypatch.setattr(inst, "_gpu_list", None)
     monkeypatch.setattr(gpu, "detect_gpus", lambda: calls.append("detect") or [])
     monkeypatch.setattr(gpu, "nvidia_vram", lambda gpus: gpus)
-    first = inst._capacity_estimate(Config(), 2)
-    second = inst._capacity_estimate(Config(), 3)
+    first = inst._capacity_estimate(Config(), paths, 2)
+    second = inst._capacity_estimate(Config(), paths, 3)
     assert calls == ["detect"]                                # one probe for a whole bulk start
-    assert first["max_instances"] == capacity.estimate(Config(), [], running=2)["max_instances"]
+    assert first["max_instances"] == capacity.estimate(Config(), [], running=2, paths=paths)["max_instances"]
     assert {"limits", "binding", "advice", "max_instances"} <= set(second)
+
+
+def test_the_estimate_is_made_for_this_farm_home(farm, monkeypatch):
+    """The host module looks for the NVIDIA runtime in a farm home; it has to be this one,
+    not whatever $SUPERFARM_HOME says."""
+    from superfarm.host import capacity
+
+    seen = {}
+    monkeypatch.setattr(inst, "_gpu_list", (inst.time.monotonic(), []))
+    monkeypatch.setattr(capacity, "estimate", lambda config, gpus, **kw: seen.update(kw) or {"max_instances": 3})
+    farm.mgr.backends.capacity_estimate = inst._capacity_estimate
+    assert farm.mgr.capacity()["estimate"] == {"max_instances": 3}
+    assert seen == {"running": 0, "paths": farm.paths}
