@@ -1,11 +1,12 @@
 # Installed and built
-node_modules/
-.next/
-out/
-next-env.d.ts
+/node_modules/
+/.next/
+/out/
+/next-env.d.ts
 
 # Copied in by scripts/sync-panel.mjs at build time: the panel, the docs and the tokens
-# have one source each, elsewhere in the repository.
-public/panel/
-public/docs/
-generated/
+# have one source each, elsewhere in the repository. (The leading slash matters:
+# mock/generated/ is committed, generated/ at this level is not.)
+/public/panel/
+/public/docs/
+/generated/

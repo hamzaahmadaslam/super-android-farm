@@ -52,6 +52,19 @@ writeFileSync(join(PANEL, 'js', 'transport.js'),
   '// Written by demo/scripts/sync-panel.mjs: in the demo the panel talks to a backend inside the page.\n'
   + "export * from './demo/transport.js';\n");
 
+// Every module the copied panel imports must be there. A file left out of the repository
+// (an ignore rule that matches too much) would otherwise build fine and fail in the browser.
+const importsOf = (source) => [...source.matchAll(/(?:^|\n)\s*(?:import|export)\b[^'"`;]*?\bfrom\s*['"]([^'"]+)['"]|(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g)].map((m) => m[1] || m[2]);
+const todo = [join(PANEL, 'js', 'main.js')];
+const seen = new Set();
+while (todo.length) {
+  const file = todo.pop();
+  if (seen.has(file)) continue;
+  seen.add(file);
+  if (!existsSync(file)) fail(`${relative(PANEL, file)} is imported by the panel but is not in the build. Is it committed?`);
+  for (const target of importsOf(read(file))) todo.push(join(dirname(file), target));
+}
+
 // The demo's own stylesheet, and a note for crawlers: the page is found, not listed.
 const index = join(PANEL, 'index.html');
 const html = read(index);

@@ -60,12 +60,26 @@ def test_the_site_depends_on_four_packages_and_pins_them():
 
 def test_nothing_built_or_installed_is_committed():
     ignore = read(DEMO / ".gitignore")
-    for line in ("node_modules/", ".next/", "out/", "public/panel/", "public/docs/", "generated/"):
-        assert line in ignore, f"demo/.gitignore must list {line}"
+    for line in ("/node_modules/", "/.next/", "/out/", "/public/panel/", "/public/docs/", "/generated/"):
+        assert f"\n{line}\n" in ignore, f"demo/.gitignore must list {line}, anchored with its leading slash"
     if shutil.which("git"):
         tracked = subprocess.run(["git", "ls-files", "demo"], cwd=ROOT, capture_output=True, text=True, timeout=30).stdout.split()
         bad = [p for p in tracked if re.search(r"^demo/(node_modules|\.next|out|public/panel|public/docs|generated)/", p)]
         assert bad == [], f"built or copied files are tracked: {bad[:5]}"
+
+
+def test_every_file_the_build_needs_is_committed():
+    """The site is built from a fresh clone. A file that exists here but is ignored by git (an
+    ignore rule that matches too much) would build without an error and fail in the browser."""
+    if not shutil.which("git") or not (ROOT / ".git").exists():
+        pytest.skip("needs a git checkout")
+    needed = [p.relative_to(ROOT).as_posix() for p in sources() if DEMO in p.parents]
+    assert len(needed) > 40 and any("mock/generated/" in p for p in needed)
+    ignored = subprocess.run(["git", "check-ignore", "--no-index", *needed], cwd=ROOT, capture_output=True, text=True, timeout=30).stdout.split()
+    assert ignored == [], f"needed by the build but ignored by git: {ignored}"
+    for path in mock_sources():
+        for target in web.imports_of(path):
+            assert (path.parent / target).is_file(), f"{path.name} imports {target}, which does not exist"
 
 
 def test_there_is_no_hosted_ci():

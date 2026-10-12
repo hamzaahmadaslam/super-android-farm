@@ -32,7 +32,7 @@ Some of the demo's data comes from the real code so that it cannot drift by hand
 .venv/bin/python demo/scripts/generate.py
 ```
 
-Two tests keep the demo honest, and both run in the normal local gate (`scripts/check.sh`). `tests/unit/test_demo_contract.py` fails when the generated files are stale, when the panel calls a route the fake backend does not answer, or when an answer of the fake backend has a different shape from the real API's answer to the same request. `tests/unit/test_demo_site.py` checks the site's own files: the dependencies, the headers in `vercel.json`, and that nothing private is in them.
+Two test files keep the demo in step, and both run in the normal local gate (`scripts/check.sh`). `tests/unit/test_demo_contract.py` fails when the generated files are stale, when the panel calls a route the fake backend does not answer, or when an answer of the fake backend has a different shape from the real API's answer to the same request. `tests/unit/test_demo_site.py` checks the site's own files: the dependencies, the headers in `vercel.json`, and that nothing private is in them.
 
 ## Run it locally
 
@@ -73,7 +73,7 @@ route('GET', '/api/things/{id}', ({ params, query, body }) => {
 });
 ```
 
-A handler returns the JSON body. `created(body)` and `accepted(task)` from `backend.js` answer with 201 and 202, and throwing one of the errors from `farm.js` (`bad`, `notFound`, `conflict`) answers with the real API's error envelope. Keep what the route needs in `db`, give it a starting value in `seed.js`, and read the real route in `superfarm/api/routes/` for the exact field names. If the answer should be compared with the real API, add the request to the list in the contract test.
+A handler returns the JSON body. `created(body)` and `accepted(task)` from `backend.js` answer with 201 and 202, and throwing one of the errors from `farm.js` (`bad`, `notFound`, `conflict`) answers with the real API's error envelope. Keep what the route needs in `db`, give it a starting value in `seed.js`, and read the real route in `superfarm/api/routes/` for the exact field names. A new `GET` route must also be added to the list `COMPARED` in `tests/unit/test_demo_contract.py`, with the matching request to the real application, or to `NOT_COMPARED` with the reason. The test says so when it is missing.
 
 ## Deployment
 
@@ -91,9 +91,9 @@ The demo covers the routes the panel calls. A route that exists only for the com
 
 Flows that you write are checked by a simplified checker. It knows the layout of a flow file and the real step names, and it does not check a step's arguments or nested steps. The demo says so when it has checked one. The bundled example flows carry the real validator's summary.
 
-The live view shows pictures a few times a second. The H.264 view of the real panel is switched off, because there is no device stream to relay. Native windows, listening to a device and the virtual camera need a desktop, a sound device or a kernel module, so the demo keeps their lists and reports that there is nothing to open.
+The live view shows pictures a few times a second. The H.264 view of the real panel is switched off, because there is no device stream to relay. Native windows need a desktop, and the demo reports that it has none. Listening to a device and the virtual camera keep their state, which Android is listened to and which feed plays where, with no sound or picture behind it.
 
-The Assistant and AI Pilot pages open, and a model profile can be added and edited, but no language model is connected. Testing a profile reports that nothing was contacted, and starting a conversation or a Pilot session answers that the demo has no model.
+The Assistant and AI Pilot pages open, and a model profile can be added and edited, but no language model is connected. Testing a profile reports that nothing was contacted, and starting a conversation or a Pilot session answers that the demo has no model. `demo/mock/routes/ai.js` holds these routes, and it is where a canned conversation or a scripted Pilot session would be added.
 
 The simulated assistant files a request now and then so that the Approvals page has something to answer. At most two requests wait at a time, and its name carries "(simulated)". No model is involved.
 
