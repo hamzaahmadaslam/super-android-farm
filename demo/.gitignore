@@ -1,0 +1,11 @@
+# Installed and built
+node_modules/
+.next/
+out/
+next-env.d.ts
+
+# Copied in by scripts/sync-panel.mjs at build time: the panel, the docs and the tokens
+# have one source each, elsewhere in the repository.
+public/panel/
+public/docs/
+generated/

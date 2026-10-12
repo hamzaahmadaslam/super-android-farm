@@ -63,7 +63,21 @@ no_secrets() {
     echo "files of a kind that must not be committed"; rc=1
   fi
   if [ -s "$words" ]; then
-    if git grep -nIi -f "$words" -- . ; then echo "private words found in tracked files"; rc=1; fi
+    # .git/info/private-allow lists the exact strings in which such a word is expected
+    # (the repository address, the copyright line); they are cut out before the search.
+    local allow=$ROOT/.git/info/private-allow hits
+    hits=$(git grep -nIi -f "$words" -- . | "$PY" -c '
+import pathlib, re, sys
+allow = [l for l in pathlib.Path(sys.argv[1]).read_text().splitlines() if l] if pathlib.Path(sys.argv[1]).is_file() else []
+words = [l for l in pathlib.Path(sys.argv[2]).read_text().splitlines() if l]
+for line in sys.stdin:
+    rest = line
+    for a in allow:
+        rest = re.sub(re.escape(a), "", rest, flags=re.I)
+    if any(w.lower() in rest.split(":", 2)[-1].lower() for w in words):
+        sys.stdout.write(line)
+' "$allow" "$words")
+    if [ -n "$hits" ]; then printf '%s\n' "$hits"; echo "private words found in tracked files"; rc=1; fi
   fi
   return $rc
 }
@@ -98,6 +112,12 @@ if bad:
 PY
 }
 
+doc_generated() {   # the CLI, API and flow-step references are generated; they must match the code
+  "$PY" scripts/gen_cli_docs.py --check docs/CLI.md &&
+  "$PY" scripts/gen_api_docs.py --check docs/API.md &&
+  "$PY" scripts/gen_flow_docs.py --check docs/AUTOMATION.md
+}
+
 unit() { "$PY" -m pytest -o addopts="" -q tests/unit; }
 live() { SF_LIVE=1 "$PY" -m pytest -o addopts="" -q tests/live; }
 
@@ -107,6 +127,7 @@ step "panel JavaScript syntax" js_syntax
 step "no secrets or private data" no_secrets
 step "documentation links" doc_links
 step "settings reference up to date" config_docs
+step "generated references up to date" doc_generated
 if [ "$mode" != quick ]; then step "unit tests" unit; fi
 if [ "$mode" = live ]; then step "live tests" live; fi
 

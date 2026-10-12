@@ -1,7 +1,7 @@
 // Start-up: theme, session, the shell (sidebar, top bar, command palette, shortcuts)
 // and navigation. Everything else lives in the page modules.
 
-import { get, hooks, post, setCsrf, socketUrl } from './api.js';
+import { get, hooks, openSocket, post, setCsrf } from './api.js';
 import { ingestApprovals, refreshApprovals, startApprovals, stopApprovals, subscribe as onApprovals } from './approvals.js';
 import { androidsText, capacityText, confirmOverCapacity, fleetAction, plural, UP } from './common.js';
 import { confirmDialog } from './components/dialog.js';
@@ -16,6 +16,7 @@ import * as access from './pages/access.js';
 import * as android from './pages/android.js';
 import * as androids from './pages/androids.js';
 import * as approvals from './pages/approvals.js';
+import * as assistant from './pages/assistant.js';
 import * as apps from './pages/apps.js';
 import * as automation from './pages/automation.js';
 import * as backups from './pages/backups.js';
@@ -24,6 +25,7 @@ import * as dashboard from './pages/dashboard.js';
 import { guideHidden, showGuideAgain } from './pages/guide.js';
 import * as media from './pages/media.js';
 import * as network from './pages/network.js';
+import * as pilot from './pages/pilot.js';
 import * as settings from './pages/settings.js';
 import * as system from './pages/system.js';
 import { getPref, setPref } from './prefs.js';
@@ -34,14 +36,14 @@ const ROUTES = {
   dashboard: dashboard.render, androids: androids.render, android: android.render, control: control.render,
   apps: apps.render, network: network.render, automation: automation.render, media: media.render,
   backups: backups.render, system: system.render, settings: settings.render,
-  approvals: approvals.render, access: access.render,
+  approvals: approvals.render, access: access.render, assistant: assistant.render, pilot: pilot.render,
 };
 // The Android detail page belongs to the "Androids" entry of the navigation.
 const NAV_OF = { android: 'androids' };
 const TITLES = {
   dashboard: 'Dashboard', androids: 'Androids', android: 'Android', control: 'Control', apps: 'Apps', network: 'Network',
   automation: 'Automation', media: 'Media', backups: 'Backups', system: 'System', settings: 'Settings',
-  approvals: 'Approvals', access: 'AI access',
+  approvals: 'Approvals', access: 'AI access', assistant: 'Assistant', pilot: 'AI Pilot',
 };
 let currentRoute = '';
 let farmName = 'Super Farm';
@@ -208,7 +210,7 @@ function connectEvents() {
   let pending = 0;
   const open = () => {
     if (closed) return;
-    socket = new WebSocket(socketUrl('/api/events'));
+    socket = openSocket('/api/events');
     socket.addEventListener('message', (event) => {
       // An approval request that was created or decided travels in the message itself.
       try {
@@ -236,8 +238,11 @@ async function showApp() {
   initTasks();
   // A request that arrives while another page is open is announced; the toast only leads
   // to the inbox, it never answers anything.
-  startApprovals((fresh) => {
+  startApprovals((arrived) => {
     if (currentRoute === 'approvals') return;
+    // On the Assistant page its own requests are asked in the transcript already.
+    const fresh = currentRoute === 'assistant' ? arrived.filter((item) => !String(item.caller).startsWith('assistant:')) : arrived;
+    if (!fresh.length) return;
     const first = fresh[0];
     warn(fresh.length === 1 ? `${first.caller} asks for approval: ${first.summary}` : `${fresh.length} requests from AI assistants are waiting for your approval.`,
       { action: { label: 'Review', run: () => go('approvals') }, timeout: 20000 });

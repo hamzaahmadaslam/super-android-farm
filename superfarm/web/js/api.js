@@ -1,11 +1,16 @@
 // The one place that talks to the daemon. Same origin only: the session cookie
 // authenticates, and every change carries the CSRF value handed out at login.
+// The network itself is reached through transport.js, which this module re-exports.
 //
 // Three answers are handled here so that no page has to:
 //   401                 the session ended            -> back to the login screen
 //   409 over_capacity   a start would exceed the capacity estimate -> ask "Run anyway",
 //                       and repeat the call with force: true
 //   { task }            long work was queued         -> handed to the task drawer
+
+import { request as transportRequest } from './transport.js';
+
+export { mediaUrl, openSocket, streamInto } from './transport.js';
 
 const CSRF_COOKIE = 'sf_csrf';
 let csrfValue = '';
@@ -95,7 +100,7 @@ async function send(method, path, body, { quiet = false } = {}) {
   }
   let response;
   try {
-    response = await fetch(path, init);
+    response = await transportRequest(path, init);
   } catch {
     hooks.link(false);
     throw new ApiError(0, { code: 'unreachable', message: 'The farm daemon did not answer. Is `sf serve` still running?' });
@@ -117,6 +122,8 @@ async function send(method, path, body, { quiet = false } = {}) {
 
 export const get = (path, params) => request('GET', path + query(params));
 export const post = (path, body = {}) => request('POST', path, body);
+// For a task the page follows by itself (a chat turn): no "Started" toast, no entry to wait on.
+export const postQuiet = (path, body = {}) => request('POST', path, body, { quiet: true });
 export const put = (path, body = {}) => request('PUT', path, body);
 export const patch = (path, body = {}) => request('PATCH', path, body);
 export const del = (path, body) => request('DELETE', path, body);
@@ -129,8 +136,4 @@ export function upload(path, file, fields = {}) {
   }
   form.append('file', file, file.name);
   return request('POST', path, form);
-}
-
-export function socketUrl(path) {
-  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`;
 }

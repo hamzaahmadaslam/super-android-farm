@@ -230,7 +230,7 @@ def test_the_bundled_examples_all_parse(library):
     for name in names:
         parsed = library.check(name)
         assert parsed.builtin and parsed.description and parsed.steps
-    assert {"examples/open-app", "examples/dismiss-permission-dialog", "examples/settings-search",
+    assert {"examples/open-app", "examples/dismiss-permission-dialog", "examples/settings-open-entry",
             "examples/type-into-focused-field", "examples/scroll-until-visible"} <= set(names)
 
 

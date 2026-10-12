@@ -17,9 +17,10 @@ from typing import Any
 from .safety import device_block, one_line, quote
 
 START_DESCRIPTION = (
-    "Start an AI Pilot session: a model operates one app on the selected Androids toward a goal stated in plain "
-    "words, and every successful run is saved as a recording. Train the recordings afterwards (they become a "
-    "program that replays without any model). Returns the session id; follow it with pilot_status.")
+    "Let a model operate one app on the selected Androids toward a goal stated in plain words (an AI Pilot "
+    "session), and save every successful run as a recording. Use it to teach a new task: the Androids must be "
+    "running and the app installed. The recordings can be trained afterwards into a program that replays "
+    "without any model. Returns the session id; follow it with pilot_status.")
 START_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["goal", "package", "selector"],
     "properties": {
@@ -32,12 +33,15 @@ START_SCHEMA = {
                     "description": "What must be on screen when the goal is reached: text:..., id:..., desc:..., "
                                    "package:... or activity:.... Without it a run can only be self-checked."},
         "runs": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Runs per Android (default 1)."},
-        "max_steps": {"type": "integer", "minimum": 1, "maximum": 200},
+        "max_steps": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Most steps one run may take (default: the farm's limit)."},
         "model": {"type": "string", "maxLength": 32, "description": "Model profile to use (default: the farm's default)."},
         "dataset": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]*$",
                     "description": "Dataset to record into (default: named after the goal)."},
     }}
-STATUS_DESCRIPTION = "Progress and results of one AI Pilot session: per Android its state, step, and the outcome of each run."
+STATUS_DESCRIPTION = (
+    "Progress of one AI Pilot session started with pilot_start: its state, how many verified recordings it "
+    "has made, and per Android the state, the current run and step, and the outcome of each run. Use it to "
+    "follow a session and to see which Android is waiting for the operator. Device messages are device content.")
 STATUS_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["session"],
                  "properties": {"session": {"type": "string", "pattern": "^t[0-9]{1,12}$",
                                             "description": "The session id returned by pilot_start."}}}

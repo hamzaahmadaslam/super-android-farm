@@ -92,6 +92,50 @@
 .tools td:nth-child(2) { min-width: 260px; }
 .setting-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); padding: var(--s-3) var(--s-4); border: 1px solid var(--border); border-radius: var(--r-md); }
 
+/* ------------------------------------------------- assistant, pilot, models */
+.chat { display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); gap: var(--s-4); align-items: start; }
+.chat-side .btn.grow { justify-content: flex-start; text-align: left; min-width: 0; overflow: hidden; }
+.chat-side .btn.grow > .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-item { flex-wrap: nowrap; }
+.chat-main { display: flex; flex-direction: column; min-height: 60vh; }
+.chat-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); }
+.chat-head h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 120px; }
+.chat-log { flex: 1; display: flex; flex-direction: column; gap: var(--s-3); min-height: 280px; max-height: 62vh; overflow-y: auto; padding: var(--s-3) var(--s-1); }
+.chat-start { display: flex; flex-direction: column; gap: var(--s-3); }
+.chat-start .chips { justify-content: center; }
+.chat-start .chip { height: auto; min-height: 30px; padding-block: 5px; white-space: normal; text-align: left; }
+.chat-form { display: flex; flex-direction: column; gap: var(--s-2); }
+.msg { max-width: min(100%, 860px); min-width: 0; }
+.msg-who { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: .8rem; font-weight: 620; letter-spacing: .04em; text-transform: uppercase; margin-bottom: 3px; }
+.msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.user { align-self: flex-end; padding: var(--s-2) var(--s-3); background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: var(--r-lg) var(--r-lg) var(--r-sm) var(--r-lg); }
+.msg.model, .msg.final { padding: var(--s-3); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-lg) var(--r-lg) var(--r-lg) var(--r-sm); }
+.msg.tool, .msg.result { padding: var(--s-2) var(--s-3); border-left: 3px solid var(--border-strong); font-size: .94rem; }
+.msg.approval-slot { max-width: none; }
+.result-text { margin-top: var(--s-1); max-height: 220px; overflow: auto; font-size: .86rem; color: var(--muted); }
+/* What a device showed is fenced and labelled: it is data, never the farm speaking. */
+.untrusted { margin-top: var(--s-1); padding: var(--s-2) var(--s-3); border: 1px dashed var(--warn); border-radius: var(--r-md); background: var(--warn-soft); }
+.untrusted-label { display: flex; align-items: center; gap: 6px; color: var(--warn); font-size: .82rem; font-weight: 620; }
+.untrusted .result-text { color: var(--text); }
+.final-actions { margin-top: var(--s-3); }
+.final-actions ul { list-style: none; padding: 0; margin-top: var(--s-1); display: flex; flex-direction: column; gap: 4px; }
+/* The farm's own record: a different voice from the model's, and it looks it. */
+.farm-record { margin-top: var(--s-3); padding: var(--s-2) var(--s-3); border: 1px solid var(--accent-line); border-left-width: 4px; border-radius: var(--r-md); background: var(--surface-solid); font-family: var(--mono); font-size: .9rem; }
+.farm-record-label { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; color: var(--accent); font-family: var(--font); font-size: .78rem; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; }
+.model.card h3 { margin: 0 auto 0 0; display: flex; align-items: center; gap: var(--s-2); }
+.probe { padding: var(--s-3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); display: flex; flex-direction: column; gap: var(--s-2); }
+.probe-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.probe-list li { display: flex; align-items: flex-start; gap: var(--s-2); }
+.pilot-devices { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); gap: var(--s-4); }
+.pilot-device { display: flex; gap: var(--s-4); align-items: flex-start; }
+.pilot-device > * + * { margin-top: 0; }
+.pilot-shot { flex: none; width: 124px; }
+.pilot-shot .thumb { display: block; width: 100%; aspect-ratio: 9 / 16; object-fit: cover; object-position: top; background: var(--screen); border-radius: var(--r-md); border: 1px solid var(--border); }
+.pilot-actions { display: flex; flex-direction: column; gap: 6px; padding-left: 2em; }
+.pilot-actions .reason { overflow-wrap: anywhere; }
+.pilot-top h2 { overflow-wrap: anywhere; }
+.value-row input[type="text"], .value-row input[type="password"] { flex: 1 1 140px; min-width: 0; }
+
 /* ------------------------------------------------------------- fleet grid */
 .fleet-tools { display: flex; flex-direction: column; gap: var(--s-3); margin-bottom: var(--s-4); }
 .fleet-tools .toolbar { margin: 0; }
@@ -139,6 +183,9 @@
   .dash > .wide-md { grid-column: 1 / -1; }
 }
 @media (max-width: 900px) {
+  .chat { grid-template-columns: minmax(0, 1fr); }
+  .chat-log { max-height: none; }
+  .pilot-device { flex-direction: column; }
   .choices { grid-template-columns: minmax(0, 1fr); }
   .approval-actions .btn.large { flex: 1 1 130px; }
   .cols-machine { grid-template-columns: minmax(0, 1fr); }

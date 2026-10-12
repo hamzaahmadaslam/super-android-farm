@@ -133,18 +133,18 @@ def test_example_open_app(tmp_path, device):
     assert device.current()[0] == SETTINGS
 
 
-def test_example_settings_search(tmp_path, device):
-    result = run_flow(tmp_path, device, "examples/settings-search", {"query": "display"})
-    assert result["state"] == "done" and result["done"] == 6, result
+def test_example_settings_open_entry(tmp_path, device):
+    result = run_flow(tmp_path, device, "examples/settings-open-entry", {"entry": "Display"})
+    assert result["state"] == "done" and result["done"] == 5, result
     nodes = Device(device.adb).nodes()
-    box = next(n for n in nodes if n["editable"])
-    assert box["text"] == "display" and box["package"] == SEARCH
-    assert any("display" in n["text"].lower() for n in nodes if not n["editable"])
+    assert any(n["id"] == "collapsing_toolbar" and n["desc"] == "Display" for n in nodes)
 
 
 def test_example_type_into_focused_field(tmp_path, device):
-    # the search box of the previous test still holds text; this must replace it
-    run_flow(tmp_path, device, "examples/settings-search", {"query": "sound"})
+    # a search box holding text; the example must replace it (this Android is not trimmed, so Settings has one)
+    run_flow(tmp_path, device, f"package: {SETTINGS}\nsteps:\n  - launch: {{fresh: true}}\n"
+                               "  - wait_for: {id: search_action_bar}\n  - tap: {id: search_action_bar}\n"
+                               "  - wait_for: {editable: true, focused: true}\n  - type: {text: sound}\n")
     result = run_flow(tmp_path, device, "examples/type-into-focused-field", {"text": "wifi"})
     assert result["state"] == "done", result
     box = next(n for n in Device(device.adb).nodes() if n["editable"])
@@ -248,11 +248,11 @@ def test_fleet_run_recording_and_teaching_through_the_facade(tmp_path, adb):
     auto = Automation(config, Paths(tmp_path / "home").ensure(), OneAndroid(adb), tasks)
     try:
         # a flow as a Task, with per-device state
-        task = auto.run("flow", "examples/settings-search", "all", variables={"query": "apps"})
+        task = auto.run("flow", "examples/settings-open-entry", "all", variables={"entry": "Storage"})
         tasks.wait(task, timeout=180)
         status = auto.run_status(task.id)
         assert task.state == "done" and task.results[1]["ok"], status
-        assert status["devices"]["1"]["state"] == "done" and status["devices"]["1"]["done"] == 6
+        assert status["devices"]["1"]["state"] == "done" and status["devices"]["1"]["done"] == 5
 
         # the live screen, and a role taught from it
         run_flow(tmp_path, Device(adb), "examples/open-app", {"package": SETTINGS})

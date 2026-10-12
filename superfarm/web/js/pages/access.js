@@ -8,9 +8,11 @@
 import { get, patch } from '../api.js';
 import { badge, button, emptyState, linkButton, pageHead, panel, skeleton } from '../common.js';
 import { describeConfig } from '../components/help.js';
+import { tabs } from '../components/tabs.js';
 import { fail, ok } from '../components/toast.js';
 import { copyText, h, replace } from '../dom.js';
 import { icon } from '../icons.js';
+import { modelsTab } from './ai-models.js';
 
 const MODES = [['read-only', 'Read-only', 'device'], ['ask', 'Ask me', 'approval'], ['allow', 'Allow', 'check']];
 const CLASSES = [
@@ -35,15 +37,24 @@ function toggle(label, on, save, { disabled = false, title = '' } = {}) {
   }, h('span', { class: 'knob', 'aria-hidden': 'true' }), h('span', { class: 'switch-word' }, on ? 'on' : 'off'));
 }
 
-export async function render(root, _params, scope) {
+export async function render(root, params, scope) {
+  const view = tabs([
+    { id: 'policy', label: 'Policy and tools', render: (panelEl, inner) => policyTab(panelEl, inner) },
+    { id: 'models', label: 'Models', render: (panelEl) => modelsTab(panelEl) },
+  ], { active: params[0] || 'policy', parent: scope, label: 'AI access', onChange: (id) => history.replaceState(null, '', `#/access/${id}`) });
+  root.append(
+    pageHead('AI access', 'What AI assistants may do on this farm through its tools, which models the farm itself may use, and how to connect an assistant.',
+      linkButton('Approvals', '#/approvals', '', 'approval')),
+    view.el);
+}
+
+async function policyTab(root, scope) {
   const policyBox = h('div', null, skeleton(3));
   const toolsBox = h('div', null, skeleton(6));
   const connectBox = h('div', null, skeleton(4));
   const texts = { policy: '', ask_for: '', auto_approve: '', deny: '', timeout: '', enabled: '' };
 
   root.append(
-    pageHead('AI access', 'What AI assistants may do on this farm through its tools, and how to connect one.',
-      linkButton('Approvals', '#/approvals', '', 'approval')),
     h('div', { class: 'stack' },
       h('div', { class: 'banner info', role: 'note' }, icon('info'),
         h('div', { class: 'grow' }, h('strong', null, 'What this guards. '),

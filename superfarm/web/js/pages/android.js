@@ -1,7 +1,7 @@
 // One Android: its screen framed as a device with the buttons beside it and the facts
 // underneath on the left, everything else about it in tabs on the right.
 
-import { del, get, patch, post, query, upload } from '../api.js';
+import { del, get, mediaUrl, patch, post, query, upload } from '../api.js';
 import { affectedList, badge, button, card, deviceActions, emptyState, facts, field, fleetAction, h264Offered, kv, option, pageHead, splitCommand, stateBadge } from '../common.js';
 import { confirmDialog } from '../components/dialog.js';
 import { help } from '../components/help.js';
@@ -124,7 +124,7 @@ function files(id, state) {
       columns: [
         { title: 'Name', cell: (e) => (e.type === 'dir'
           ? h('button', { type: 'button', class: 'btn small ghost', dataset: { focus: e.path }, onclick: () => open(e.path) }, `${e.name}/`)
-          : h('a', { href: `/api/instances/${id}/files/pull${query({ path: e.path })}`, download: e.name }, e.name)) },
+          : h('a', { href: mediaUrl(`/api/instances/${id}/files/pull${query({ path: e.path })}`), download: e.name }, e.name)) },
         { title: 'Size', class: 'num', cell: (e) => (e.type === 'dir' ? '' : bytes(e.size)) },
         { title: 'Changed', cell: (e) => when(e.modified) },
       ],
@@ -372,7 +372,7 @@ export async function render(root, params, scope) {
         ? liveView(id, scope, {
           send: sendInput(() => [id]), h264: h264Offered(system), label: state.name, frame: true, keys: 'side',
           aspect: state.screen && [state.screen.width, state.screen.height],
-          extra: h('a', { class: 'btn ghost icon-only', href: `/api/instances/${id}/screenshot`, download: `android-${id}.png`, 'aria-label': 'Save a screenshot', title: 'Save a screenshot' }, icon('camera')),
+          extra: h('a', { class: 'btn ghost icon-only', href: mediaUrl(`/api/instances/${id}/screenshot`), download: `android-${id}.png`, 'aria-label': 'Save a screenshot', title: 'Save a screenshot' }, icon('camera')),
         })
         : emptyState('device', 'Not running', 'Start this Android to see and control its screen.', power('Start', 'play', () => act('start'), 'primary')));
       readNet();

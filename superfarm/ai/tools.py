@@ -31,7 +31,7 @@ from typing import Any
 
 from ..cli.client import Api, ApiError, CliError, DaemonDown
 from ..core.models import InstanceSpec, parse_selector
-from . import schema
+from . import pilot_tools, schema
 from .policy import ALLOW, ASK, CHANGE, DENY, DESTRUCTIVE, READ, Policy, decide
 from .safety import device_block, one_line, quote, redact, secret_name
 
@@ -575,9 +575,13 @@ def _create_androids(api: Api, a: dict, lim: Limits) -> ToolResult:
     body = {"count": int(a.get("count", 1)), "name": a.get("name", ""), "template": _spec_patch(a)}
     specs = api.post("/api/instances", body)["instances"]
     ids = [s["id"] for s in specs]
-    return ToolResult({"ok": True, "created": ids},
+    if not ids:
+        return ToolResult({"ok": True, "created": ids}, "Created no Androids.")
+    contiguous = len(ids) > 1 and ids == list(range(ids[0], ids[0] + len(ids)))
+    selector = f"{ids[0]}-{ids[-1]}" if contiguous else ",".join(str(i) for i in ids)
+    return ToolResult({"ok": True, "created": ids, "start_with": {"tool": "start_androids", "selector": selector}},
                       f"Created {len(ids)} Android(s): id {', '.join(str(i) for i in ids)}. They are not running yet: "
-                      "call start_androids.")
+                      f"start them with start_androids using selector \"{selector}\".")
 
 
 def _bulk(action: str) -> Callable[[Api, dict, Limits], ToolResult]:
@@ -800,6 +804,8 @@ def _build() -> tuple[Tool, ...]:
              _schema({"id": ANDROID_ID,
                       "refresh": {"type": "boolean", "description": "Ask for the public IP again from inside the Android's network (a few seconds)."}},
                      ["id"]), READ, ("GET /api/instances/{id}/net",), _network_status, target="id"),
+        Tool("pilot_status", "Progress of a Pilot session", pilot_tools.STATUS_DESCRIPTION, pilot_tools.STATUS_SCHEMA, READ,
+             ("GET /api/ai/pilot/sessions/{id}",), pilot_tools.pilot_status),
 
         # ---------------------------------------------------------------- change
         Tool("create_androids", "Create Androids",
@@ -918,6 +924,8 @@ def _build() -> tuple[Tool, ...]:
              _schema(_sel(), ["selector"]), CHANGE, ("POST /api/backups",), _create_backup,
              describe=lambda a, w: f"Back up the data of {w.noun} (a running Android may be stopped for the copy)",
              target="selector"),
+        Tool("pilot_start", "Teach a task with the AI Pilot", pilot_tools.START_DESCRIPTION, pilot_tools.START_SCHEMA, CHANGE,
+             ("POST /api/ai/pilot",), pilot_tools.pilot_start, pilot_tools.describe_start, target="selector"),
 
         # ----------------------------------------------------------- destructive
         Tool("delete_androids", "Delete Androids",
@@ -970,10 +978,10 @@ def _run_extra(a: dict) -> str:
 TOOL_NAMES = (
     "farm_status", "list_androids", "get_android", "system_doctor", "list_apps", "app_matrix", "get_task",
     "wait_for_task", "list_tasks", "list_flows", "list_programs", "run_status", "screenshot", "read_screen",
-    "list_backups", "network_status",
+    "list_backups", "network_status", "pilot_status",
     "create_androids", "start_androids", "stop_androids", "restart_androids", "set_android", "install_app",
     "launch_app", "stop_app", "tap", "swipe", "type_text", "press_key", "run_flow", "run_program", "cancel_task",
-    "create_backup",
+    "create_backup", "pilot_start",
     "delete_androids", "uninstall_app", "clear_app_data", "restore_backup", "run_shell",
 )
 _TOOLS: dict[str, Tool] = {t.name: t for t in _build()}

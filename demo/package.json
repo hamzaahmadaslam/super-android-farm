@@ -1,0 +1,23 @@
+{
+  "name": "super-farm-demo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The public demo of the Super Farm panel: the real panel files over a backend that runs in the browser.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "sync": "node scripts/sync-panel.mjs",
+    "dev": "node scripts/sync-panel.mjs && NEXT_TELEMETRY_DISABLED=1 next dev",
+    "build": "node scripts/sync-panel.mjs && NEXT_TELEMETRY_DISABLED=1 next build && node scripts/postbuild.mjs",
+    "preview": "node scripts/serve.mjs"
+  },
+  "dependencies": {
+    "marked": "18.1.0",
+    "next": "16.4.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}

@@ -11,7 +11,7 @@
 // send anything itself: the page decides where input goes (one device, every selected
 // device, or the recorder).
 
-import { query, socketUrl } from '../api.js';
+import { mediaUrl, openSocket, query, streamInto } from '../api.js';
 import { h } from '../dom.js';
 import { icon } from '../icons.js';
 
@@ -35,7 +35,7 @@ export function thumbnails(scope, { fps = 1, width = 240 } = {}) {
       const card = img.closest('[data-thumb-owner]');
       if (card && card.querySelector('.is-busy')) continue;
       img.dataset.loading = '1';
-      img.src = `/api/instances/${img.dataset.id}/frame.jpg${query({ width, t: Date.now() })}`;
+      img.src = mediaUrl(`/api/instances/${img.dataset.id}/frame.jpg${query({ width, t: Date.now() })}`);
     }
   }, 1000 / fps);
   scope.add(() => { clearInterval(timer); observer.disconnect(); visible.clear(); });
@@ -81,7 +81,7 @@ function startH264(id, canvas, onFail) {
     try { if (decoder && decoder.state !== 'closed') decoder.close(); } catch { /* already closed */ }
   };
   const giveUp = () => { const first = !closed; stop(); if (first) onFail(); };
-  const socket = new WebSocket(socketUrl(`/api/instances/${id}/h264`));
+  const socket = openSocket(`/api/instances/${id}/h264`);
   socket.binaryType = 'arraybuffer';
   socket.addEventListener('error', giveUp);
   socket.addEventListener('close', giveUp);
@@ -174,10 +174,9 @@ export function liveView(id, scope, { send, h264 = false, fps = 8, width = 480, 
     const img = h('img', { alt: '', draggable: false });
     img.addEventListener('load', () => { say('live', true); surface.style.aspectRatio = ''; }, { once: true });
     img.addEventListener('error', () => { say('no picture (is this Android running?)'); });
-    img.src = `/api/instances/${id}/stream.mjpg${query({ fps, width })}`;
+    const stop = streamInto(img, `/api/instances/${id}/stream.mjpg${query({ fps, width })}`);
     show(img);
-    // Clearing src is what ends the multipart request; removing the element alone does not.
-    stopTransport = () => { img.src = ''; };
+    stopTransport = stop;
   }
 
   function show(element) {

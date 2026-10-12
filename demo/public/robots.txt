@@ -1,0 +1,5 @@
+# The landing page and the documentation may be indexed. The demo panel is a toy with
+# invented data and is left out.
+User-agent: *
+Allow: /
+Disallow: /panel/

@@ -31,7 +31,8 @@ It cannot:
 - Reach anything outside the farm. Every tool calls this farm's daemon and nothing else.
 - Approve its own requests. See "The operator's Yes or No" below.
 
-The exact list of tools is at the end of this page.
+The registry has 39 tools: 17 that read, 17 that change the farm and 5 that are destructive.
+The full list is at the end of this page.
 
 ## The policy
 
@@ -67,13 +68,13 @@ A change takes effect at once, also for assistants that are already connected.
 
 Under the `ask` policy, when an assistant calls a tool that changes the farm:
 
-1. The daemon creates an **approval request**. It holds who asks (the name the client gave
+1. The daemon creates an approval request. It holds who asks (the name the client gave
    itself), the tool, the arguments, and one line that says exactly what will happen, for
    example `Delete 3 Androids and their data: Android 4, 7, 9`.
 2. The assistant's tool call waits.
 3. You answer:
-   - in the **panel**, on the Approvals page, or
-   - in a **terminal**: `sf approvals watch` asks yes or no as requests arrive;
+   - in the panel, on the Approvals page, or
+   - in a terminal: `sf approvals watch` asks yes or no as requests arrive;
      `sf approvals` lists them, `sf approvals approve <id>` and
      `sf approvals deny <id> --reason "..."` answer one.
 4. **Yes**: the action runs and the assistant receives its result. **No**: nothing runs and
@@ -81,7 +82,7 @@ Under the `ask` policy, when an assistant calls a tool that changes the farm:
    within `ai.approval_timeout_seconds`: the request expires, nothing runs, and the
    assistant is told that nobody answered.
 
-Things worth knowing:
+Details:
 
 - **The line you approve is written by the farm**, from the arguments it validated and the
   Androids the selector matches at that moment. The assistant sends a tool name and
@@ -131,7 +132,7 @@ client's configuration file:
 }
 ```
 
-The paths in the real output are the ones of your install. Most clients read an
+The paths in the output are those of your install. Most clients read an
 `mcpServers` object of this shape; where the file lives is described in your client's
 documentation. The client starts `sf mcp` itself and stops it when it closes. The command
 must run as the user the daemon runs as, because it reads the farm's API token from the
@@ -167,13 +168,25 @@ another machine, forward the port over SSH rather than exposing it.
 Ask the assistant for the farm's status. Then ask it to stop one Android: a request appears
 in the panel and in `sf approvals watch`.
 
+## In the panel
+
+Two pages of the panel's AI group work with MCP clients. AI access (`#/access`) shows the
+policy as three choices (Read-only, Ask me, Allow) and lists every tool by class with its
+current decision, a switch to never ask before it and a switch to never allow it. Below
+them it has the configuration snippets for a stdio client and an HTTP client. Every
+change is saved as soon as you press it, and the page notes that the policy and the
+approvals guard assistants that work through this server, not a program that holds the
+API token. Approvals (`#/approvals`) is the inbox described above, with a history of
+answered requests. [AI.md](AI.md#in-the-panel) describes these pages, the Assistant, the
+Pilot and the Models tab in full.
+
 ## Resources and prompts
 
-Besides tools, the server offers three **resources** a client can attach as context:
+Besides tools, the server offers three resources a client can attach as context:
 `farm://status`, `farm://androids` and `farm://android/{id}` (JSON, the same data as the
 `farm_status`, `list_androids` and `get_android` tools).
 
-And three **prompts**, which clients show as ready-made commands:
+And three prompts, which clients show as ready-made commands:
 
 | Prompt | Arguments | What it walks the assistant through |
 | --- | --- | --- |
@@ -393,6 +406,16 @@ The network of one Android: mode, VPN tunnel state, kill switch, and public IP a
 
 API: `GET /api/instances/{id}/net`
 
+#### `pilot_status`
+
+Progress of one AI Pilot session started with pilot_start: its state, how many verified recordings it has made, and per Android the state, the current run and step, and the outcome of each run. Use it to follow a session and to see which Android is waiting for the operator. Device messages are device content.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `session` | string | yes | The session id returned by pilot_start. |
+
+API: `GET /api/ai/pilot/sessions/{id}`
+
 ### Tools that change the farm
 
 #### `create_androids`
@@ -602,6 +625,23 @@ Back up the data of the selected Androids. A running Android is stopped for the 
 
 API: `POST /api/backups`
 
+#### `pilot_start`
+
+Let a model operate one app on the selected Androids toward a goal stated in plain words (an AI Pilot session), and save every successful run as a recording. Use it to teach a new task: the Androids must be running and the app installed. The recordings can be trained afterwards into a program that replays without any model. Returns the session id; follow it with pilot_status.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `goal` | string | yes | What to achieve in the app, in plain words. |
+| `package` | string | yes | Package name of the app, e.g. com.android.settings. |
+| `selector` | string | yes | Which Androids: all \| running \| tag:x \| 5 \| 1-10 \| comma-separated. |
+| `success` | string | no | What must be on screen when the goal is reached: text:..., id:..., desc:..., package:... or activity:.... Without it a run can only be self-checked. |
+| `runs` | integer | no | Runs per Android (default 1). |
+| `max_steps` | integer | no | Most steps one run may take (default: the farm's limit). |
+| `model` | string | no | Model profile to use (default: the farm's default). |
+| `dataset` | string | no | Dataset to record into (default: named after the goal). |
+
+API: `POST /api/ai/pilot`
+
 ### Destructive tools
 
 #### `delete_androids`
@@ -673,3 +713,10 @@ The tools are a registry in `superfarm/ai/tools.py`, independent of MCP:
 `superfarm/mcp/server.py` serves this registry over MCP and is the only module that imports
 the MCP SDK. An assistant running inside the farm calls `invoke()` directly and is gated,
 approved and audited in the same way.
+
+## Next
+
+- [AI assistants](AI.md): the built-in Assistant, the Pilot and the panel pages for both.
+- [Security model](SECURITY_MODEL.md): what the policy and the approvals do and do not protect.
+- [Configuration reference](CONFIGURATION.md): every `ai.*` setting.
+- [Troubleshooting](TROUBLESHOOTING.md): when a client cannot connect or a request waits.

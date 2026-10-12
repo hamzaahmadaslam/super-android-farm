@@ -2,9 +2,9 @@
 
 A flow says what to do in terms of what is *on screen*, never where it is:
 
-    name: settings-search
+    name: settings-open-entry
     package: com.android.settings
-    variables: {query: battery}          # null = must be supplied when the run starts
+    variables: {entry: Accessibility}    # null = must be supplied when the run starts
     on_unknown: stop                     # stop (ask a person) | continue (skip the step)
     timeouts: {step: 20, run: 300}
     overlays:                            # checked before every step and while waiting
@@ -14,11 +14,12 @@ A flow says what to do in terms of what is *on screen*, never where it is:
     never_tap:                           # enforced on every tap of the run
       - {text: Erase all data}
     steps:
-      - launch: com.android.settings
-      - wait_for: {id: search_action_bar}
-      - tap: {id: search_action_bar}
-      - type: {text: "{query}", into: {editable: true}}
-      - wait_for: {text_regex: "(?i).*{query}.*"}
+      - launch: {fresh: true}
+      - wait_for: {id: homepage_title}
+      - scroll_to: {id: title, text: "{entry}"}
+        max_swipes: 10
+      - tap: {id: title, text: "{entry}"}
+      - wait_for: {id: collapsing_toolbar, desc: "{entry}"}
 
 Steps: launch, stop_app, tap, long_press, type, clear, key, back, home, swipe,
 scroll_to, wait_for, wait_gone, assert, sleep, if/then/else, repeat/until, set,

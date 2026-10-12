@@ -1,7 +1,7 @@
 // Backups: the safety net. Create, verify, restore as a new Android (never touching the
 // original), back up the farm's settings, and schedule it all.
 
-import { del, get, patch, post, query } from '../api.js';
+import { del, get, mediaUrl, patch, post, query } from '../api.js';
 import { badge, button, card, emptyState, field, loadInstances, option, pageHead, panel } from '../common.js';
 import { confirmDialog, openDialog } from '../components/dialog.js';
 import { dataTable } from '../components/table.js';
@@ -69,7 +69,7 @@ export async function render(root, _params, scope) {
           else fail(`${b.name}: verification FAILED. Do not rely on this backup.`);
         }), 'small'), ' ',
         button('Restore…', () => restore(b), 'small primary'), ' ',
-        b.includes_secrets ? null : h('a', { class: 'btn small', href: `/api/backups/download${query({ archive: b.name })}`, download: '' }, 'Download'), ' ',
+        b.includes_secrets ? null : h('a', { class: 'btn small', href: mediaUrl(`/api/backups/download${query({ archive: b.name })}`), download: '' }, 'Download'), ' ',
         button('Delete', async () => {
           if (!await confirmDialog({ title: 'Delete this backup?', message: `${b.name} is removed from the backup folder. This cannot be undone.`, confirm: 'Delete', danger: true })) return;
           await attempt(() => del(`/api/backups${query({ archive: b.name })}`), 'Backup deleted.');

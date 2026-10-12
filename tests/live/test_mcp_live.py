@@ -72,7 +72,7 @@ performance: {{trim_packages: false}}
 ai: {{approval_timeout_seconds: {timeout}}}
 """
 # trim_packages is off because the default trim list disables com.android.settings.intelligence,
-# the app behind the Settings search bar this test (and the bundled settings-search flow) uses.
+# the app behind the Settings search bar this test uses.
 
 
 def cleanup(docker: Docker) -> None:
@@ -256,7 +256,7 @@ def test_protocol_and_the_operators_yes_or_no(farm, mode):
             doctor = await call(client, "system_doctor")
             assert doctor.is_error is False and len(doctor.structured_content["checks"]) > 5
             flows = await call(client, "list_flows")
-            assert "examples/settings-search" in [f["name"] for f in flows.structured_content["flows"]]
+            assert "examples/settings-open-entry" in [f["name"] for f in flows.structured_content["flows"]]
             assert (await call(client, "list_backups")).structured_content["count"] == 0
             assert (await call(client, "list_tasks")).is_error is False
             assert farm.pending() == [] and farm.api.get("/api/approvals").json()["approvals"] == []
@@ -482,14 +482,14 @@ def test_one_real_android_seen_and_driven_through_mcp(farm):
             assert (await call(client, "press_key", {"selector": "1", "key": "HOME"})).is_error is False
 
             # ---- a bundled example flow runs to the end
-            run = await call(client, "run_flow", {"selector": "1", "name": "examples/settings-search",
-                                                  "variables": {"query": "display"}})
+            run = await call(client, "run_flow", {"selector": "1", "name": "examples/settings-open-entry",
+                                                  "variables": {"entry": "Display"}})
             assert run.is_error is False, text(run)
             task_id = run.structured_content["task"]["id"]
             run = await finished(client, run, timeout=300)
             assert run.structured_content["task"]["state"] == "done" and run.structured_content["task"]["failed"] == 0, text(run)
             status = await call(client, "run_status", {"task_id": task_id})
-            assert status.structured_content["run"]["name"] == "examples/settings-search"
+            assert status.structured_content["run"]["name"] == "examples/settings-open-entry"
             assert status.structured_content["device_content"]["devices"]["1"]["state"] == "done", text(status)
 
             # ---- apps on the device are listed as device content
@@ -508,7 +508,7 @@ def test_one_real_android_seen_and_driven_through_mcp(farm):
     assert summaries[0] == 'Create 1 new Android (name="pilot")' and summaries[1] == "Start Android 1"
     assert f'Launch "{SETTINGS}" on Android 1' in summaries and 'Type "battery" on Android 1' in summaries
     assert any(s.startswith("Tap at (") and s.endswith("on the screen of Android 1") for s in summaries)
-    assert 'Run flow "examples/settings-search" on Android 1 with variables query' in summaries
+    assert 'Run flow "examples/settings-open-entry" on Android 1 with variables entry' in summaries
     assert summaries[-1] == "Delete Android 1 and its data"
     assert {a["klass"] for a in operator.approved} == {"change", "destructive"}
     assert all(a["caller"] == CALLER for a in operator.approved)

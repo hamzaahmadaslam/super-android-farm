@@ -1,0 +1,76 @@
+Super Farm
+Copyright 2026 Hamza Ahmad Aslam
+
+This product is licensed under the Apache License, Version 2.0. The full text
+is in the file LICENSE. Unless a section below says otherwise, every file in
+this repository is covered by that licence.
+
+
+Third-party material contained in this repository
+=================================================
+
+The repository contains no third-party binaries. It contains the following
+source material that modifies or derives from other projects.
+
+1. Mesa
+   File:     native/venus/mesa-26.0.8-farm.patch
+   What:     a source patch against Mesa 26.0.8 (the Venus Vulkan driver, its
+             vtest backend, Android buffer import and a gralloc backend)
+   Upstream: https://www.mesa3d.org
+   Licence:  MIT, the licence of the Mesa files it modifies. The patch is
+             distributed under that licence.
+
+2. virglrenderer
+   File:     native/venus/virglrenderer-1.2.0-farm.patch
+   What:     a source patch against virglrenderer 1.2.0 (a buffer import
+             command for the vtest server and a build fix)
+   Upstream: https://gitlab.freedesktop.org/virgl/virglrenderer
+   Licence:  MIT, the licence of virglrenderer. The patch is distributed
+             under that licence.
+
+3. redroid
+   File:     native/venus/gpu_config_venus.sh
+   What:     derived from the gpu_config.sh of the redroid project, with a
+             "venus" mode added
+   Licence:  Apache License, Version 2.0
+
+4. v4l2loopback
+   Files:    native/v4l2loopback/v4l2loopback-0.15.1-farm.patch
+             native/v4l2loopback/COPYING
+   What:     a source patch against v4l2loopback v0.15.1 (upstream commit
+             7546a42a66d856933a75c2b0896cb735e3ca00c0)
+   Upstream: https://github.com/v4l2loopback/v4l2loopback
+   Licence:  GNU General Public License, version 2 or later. The patch is a
+             modification of a GPL work and is distributed under the GPL. The
+             full text is in native/v4l2loopback/COPYING. Nothing else in this
+             repository links against or includes this kernel module; the
+             farm only loads it and talks to it through the kernel's V4L2
+             interface.
+
+
+Material that is not in this repository
+=======================================
+
+The following is obtained by you, from its own publisher and under its own
+licence, when you build or run the software. None of it is redistributed here.
+
+- Android images. Docker pulls them from their upstream publisher (by
+  default the redroid images) when you start or build an Android.
+- The sources that native/venus/build.sh downloads and builds on your
+  machine: Mesa, libdrm, virglrenderer, and the Android NDK.
+- The v4l2loopback source that native/v4l2loopback/build.sh downloads.
+- The camera HAL. native/camera/extract_hal.sh takes it from a BlissOS image
+  that you download yourself. The result stays on your machine.
+- The Python packages named in pyproject.toml, installed by pip.
+- The base images of the sidecar and helper images (Alpine Linux) and the
+  packages installed into them at build time.
+- Programs used on the host when present: Docker, adb, scrcpy, ffmpeg,
+  OpenVPN and WireGuard tools inside the sidecar image.
+
+
+Trademarks
+==========
+
+Android is a trademark of Google LLC. NVIDIA, Intel, AMD and Docker are
+trademarks of their respective owners. Super Farm is not affiliated with,
+endorsed by or sponsored by any of them. See DISCLAIMER.md.

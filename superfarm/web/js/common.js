@@ -61,6 +61,8 @@ const STATE = {
   ok: ['ok', 'check'], warn: ['warn', 'alert'], fail: ['fail', 'x'], skip: ['', 'dot'],
   done: ['ok', 'check'], failed: ['fail', 'x'], cancelled: ['warn', 'x'], queued: ['', 'clock'],
   needs_attention: ['warn', 'alert'], reconnecting: ['warn', 'spinner'], connecting: ['info', 'spinner'], auth_failed: ['fail', 'x'],
+  unverified: ['warn', 'help'], confirmed: ['ok', 'check'], waiting_approval: ['warn', 'clock'], idle: ['', 'dot'],
+  approved: ['ok', 'check'], denied: ['fail', 'x'], expired: ['warn', 'clock'], declined: ['fail', 'x'],
   info: ['info', 'info'],
 };
 

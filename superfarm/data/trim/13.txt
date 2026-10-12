@@ -53,7 +53,9 @@ com.android.backupconfirm
 com.android.localtransport
 com.android.mtp
 
-# Background helpers with no purpose here
+# Background helpers with no purpose here. settings.intelligence is the app behind the search bar
+# of the Settings app: with it disabled Settings has no search bar (measured), so flows must not
+# depend on it; list it in performance.trim_keep to keep the search bar.
 com.android.bookmarkprovider
 com.android.musicfx
 com.android.traceur

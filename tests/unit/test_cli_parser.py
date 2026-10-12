@@ -117,9 +117,9 @@ SAMPLES: dict[str, tuple[str, dict]] = {
     "ai models key": ("ai models key hosted", {"name": "hosted"}),
     "ai models rm": ("ai models rm hosted", {"name": "hosted"}),
     "ai pilot": ("ai pilot goal 1-3 --app com.example.app --success text:Done --runs 3 --max-steps 12 --dataset d "
-                 "--value city=Lahore --ask-value pin --model local --train --steps",
+                 "--value city=Berlin --ask-value pin --model local --train --steps",
                  {"words": ["goal", "1-3"], "app": "com.example.app", "success": "text:Done", "runs": 3, "max_steps": 12,
-                  "dataset": "d", "value": ["city=Lahore"], "ask_value": ["pin"], "model": "local", "train": True,
+                  "dataset": "d", "value": ["city=Berlin"], "ask_value": ["pin"], "model": "local", "train": True,
                   "steps": True}),
     "doctor": ("doctor", {}),
     "host plan": ("host plan --boot", {"boot": True}),

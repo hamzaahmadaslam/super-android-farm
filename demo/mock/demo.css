@@ -1,0 +1,33 @@
+/* What the demo adds to the panel: one banner, the note on the sign-in card and the
+   hints beside file and password fields. Colours and sizes are the panel's own tokens. */
+
+.demo-banner {
+  grid-area: notice; position: sticky; top: var(--topbar-h); z-index: var(--z-sticky);
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-4);
+  padding: var(--s-2) var(--s-5);
+  color: var(--text); background: var(--surface-solid);
+  border-bottom: 1px solid var(--border-strong);
+  box-shadow: inset 4px 0 0 var(--warn);
+  font-size: .9rem; line-height: 1.4;
+}
+.demo-banner .demo-text { flex: 1 1 420px; min-width: 0; }
+.demo-banner strong { color: var(--warn); }
+.demo-links { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-4); }
+.demo-links a { color: var(--accent); white-space: nowrap; }
+.demo-status { flex: 1 1 100%; color: var(--muted); }
+.demo-status:empty { display: none; }
+
+.demo-login {
+  margin: 0; padding: var(--s-3);
+  color: var(--text); background: var(--warn-soft);
+  border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  box-shadow: inset 4px 0 0 var(--warn);
+  font-size: .9rem; line-height: 1.45; text-align: left;
+}
+.demo-login strong { color: var(--warn); }
+
+.demo-hint { display: inline-block; max-width: 46ch; color: var(--muted); font-size: .8rem; line-height: 1.35; }
+
+@media (max-width: 700px) {
+  .demo-banner { padding: var(--s-2) var(--s-3); font-size: .82rem; }
+}

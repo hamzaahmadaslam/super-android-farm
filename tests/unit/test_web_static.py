@@ -50,6 +50,10 @@ CONTRACT = """
 /api/backups /api/backups/farm /api/backups/verify /api/backups/restore /api/backups/download
 /api/events
 /api/approvals /api/approvals/{} /api/approvals/{}/{approve|deny} /api/mcp/info
+/api/ai/models /api/ai/models/{}/test
+/api/ai/conversations /api/ai/conversations/{} /api/ai/conversations/{}/{messages|cancel}
+/api/ai/pilot /api/ai/pilot/sessions /api/ai/pilot/sessions/{} /api/ai/pilot/sessions/{}/{cancel|confirm}
+/api/ai/pilot/sessions/{}/devices/{}/resolve /api/ai/pilot/{}/{train|summary}
 """.split()
 CONTRACT_PREFIXES = ("/api/automation/",)          # "expose every public method of the facade 1:1"
 
@@ -262,11 +266,36 @@ def test_mutations_carry_the_csrf_header_and_stay_same_origin():
     api = read(WEB / "js" / "api.js")
     assert "X-SF-CSRF" in api and "credentials: 'same-origin'" in api
     # One wrapper talks to the daemon; no page calls fetch on its own.
-    others = [p.name for p in JS if p.name != "api.js" and re.search(r"\bfetch\s*\(|XMLHttpRequest", read(p))]
+    assert "transportRequest(path, init)" in api, "api.js sends through transport.js"
+    others = [p.name for p in JS if p.name != "transport.js" and re.search(r"\bfetch\s*\(|XMLHttpRequest", read(p))]
     assert others == [], f"modules bypassing api.js: {others}"
     # The token is typed into the login form and sent once; it is never kept.
     for path in JS:
         assert not re.search(r"(local|session)Storage\.setItem\([^)]*token", read(path), re.I), path.name
+
+
+def test_the_network_is_named_in_one_module():
+    """transport.js is the only module that opens a request, a socket or a media address.
+    In the panel it passes straight through to the browser; the public demo replaces this
+    one file with a backend that runs in the page (demo/mock/), so its four exports are a
+    contract, and nothing else in the panel may reach the network around it."""
+    transport = read(WEB / "js" / "transport.js")
+    assert set(re.findall(r"^export (?:const|function) (\w+)", transport, re.M)) == {
+        "request", "openSocket", "mediaUrl", "streamInto"}
+    assert not IMPORT.search(transport), "transport.js stands alone"
+    assert "export const request = (path, init) => fetch(path, init);" in transport
+    assert "export const mediaUrl = (path) => path;" in transport
+    assert not re.search(r"(local|session)Storage|document\.cookie|indexedDB", transport), "a pass-through keeps nothing"
+    for path in JS:
+        if path.name == "transport.js":
+            continue
+        text = read(path)
+        assert not re.search(r"\bnew\s+WebSocket\b|\bEventSource\b|\bsendBeacon\b", text), f"{path.name} opens a connection past transport.js"
+        # A picture or a download the browser loads by itself goes through mediaUrl() / streamInto().
+        direct = re.findall(r"(?:\.src\s*=|\bsrc:|\bhref:)\s*[`'\"]/api/[^`'\"]*", text)
+        assert direct == [], f"{path.name} hands the browser an API address past transport.js: {direct}"
+    pages = "".join(read(p) for p in JS if p.name not in ("api.js", "transport.js"))
+    assert "transport.js" not in pages, "pages import api.js, which re-exports the transport"
 
 
 def _token_blocks() -> list[tuple[str, set[str]]]:
@@ -470,22 +499,41 @@ def test_one_press_one_action_is_built_in_once():
 
 def test_the_approvals_inbox_cannot_be_answered_by_accident():
     page_js = read(WEB / "js" / "pages" / "approvals.js")
-    # The headline is the daemon's summary; the page never words a request itself.
-    assert "item.summary" in page_js and "approval-summary' }, item.summary)" in page_js
+    card = read(WEB / "js" / "components" / "approval-card.js")
+    # The headline is the daemon's summary; neither the page nor the card words a request itself.
+    assert "item.summary" in card and "approval-summary' }, item.summary)" in card
     # Append only, armed after a delay, a second click inside the card for destructive ones.
     assert "list.append(slot.el)" in page_js and "prepend" not in page_js and "insertBefore" not in page_js
-    assert "ARM_MS" in page_js and "approval-confirm" in page_js and "dataset: action" in page_js
-    assert ".focus(" not in page_js, "nothing on the inbox takes the keyboard focus by itself"
-    assert "confirmDialog" not in page_js and "openDialog" not in page_js, "the destructive confirmation is inside the card"
-    # No shortcut and no toast answers a request: only the two buttons call these.
+    assert "ARM_MS" in card and "approval-confirm" in card and "dataset: action" in card
+    for text in (page_js, card):
+        assert ".focus(" not in text, "nothing about an approval takes the keyboard focus by itself"
+        assert "confirmDialog" not in text and "openDialog" not in text, "the destructive confirmation is inside the card"
+    # One card, used by the inbox and by the Assistant's transcript: the same rules in both.
+    assert "approvalCard(" in page_js and "approvalCard(" in read(WEB / "js" / "pages" / "assistant.js")
+    # No shortcut and no toast answers a request: only the store's two functions call these,
+    # and only the card calls the store's functions.
     for path in JS:
         text = read(path)
-        if path.name not in ("approvals.js",):
+        if path.name != "approvals.js":
             assert "/approve`" not in text and "/deny`" not in text, f"{path.name} answers approvals"
+        if path.name not in ("approvals.js", "approval-card.js"):
+            assert not re.search(r"\b(approve|deny)\(", text), f"{path.name} answers approvals"
     shortcuts = read(WEB / "js" / "components" / "shortcuts.js")
     assert "approve" not in shortcuts.lower()
     store = read(WEB / "js" / "approvals.js")
     assert "data.now - Date.now() / 1000" in store, "time left is counted against the server's clock"
+
+
+def test_model_and_device_text_is_never_markup_and_the_farm_record_is_set_apart():
+    assistant = read(WEB / "js" / "pages" / "assistant.js")
+    # Rendered as text nodes through h(); the farm's record has its own labelled block.
+    assert "farm-record" in assistant and "Written by the farm, not by the model" in assistant
+    assert "event.record" in assistant and "untrusted" in assistant and "From the device: untrusted" in assistant
+    for name in ("assistant.js", "pilot.js", "ai-models.js"):
+        text = read(WEB / "js" / "pages" / name)
+        assert not re.search(r"\bfetch\s*\(|new WebSocket|new Image|XMLHttpRequest", text), f"{name} must use api.js and the live component"
+    models = read(WEB / "js" / "pages" / "ai-models.js")
+    assert "sf ai models key" in models and "type: 'password'" not in models, "keys are stored from the terminal, never typed into the panel"
 
 
 # ------------------------------------------------------------------------ wording

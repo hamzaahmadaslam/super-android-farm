@@ -222,4 +222,9 @@ def pilot_train(dataset: str, request: Request):
 
 @router.get("/pilot/{dataset}/summary")
 def pilot_summary(dataset: str, request: Request) -> dict:
-    return {"summary": _pilot(request).summary(dataset)}
+    # A dataset that has not been trained yet has no summary. That is a normal state the
+    # session page asks about on every load, so it is an empty answer and not a 404.
+    try:
+        return {"summary": _pilot(request).summary(dataset)}
+    except (KeyError, FileNotFoundError):
+        return {"summary": None}

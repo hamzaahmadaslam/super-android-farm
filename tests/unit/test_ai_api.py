@@ -199,7 +199,7 @@ def good() -> Scripted:
 def test_a_pilot_session_over_http_from_start_to_trained_program(a):
     a.scripts = [good(), good(), Scripted(call("done", reason="looks done"), call("done", reason="really"))]
     started = a.client.post(f"{AI}/pilot", json={"goal": "Open the list", "package": PACKAGE, "selector": "1",
-                                                 "success": "text:The list", "runs": 3, "values": {"city": "Lahore"}})
+                                                 "success": "text:The list", "runs": 3, "values": {"city": "Berlin"}})
     done = a.wait(started)
     sid = done["id"]
     assert done["kind"] == "ai-pilot" and done["targets"] == [1]
@@ -214,7 +214,7 @@ def test_a_pilot_session_over_http_from_start_to_trained_program(a):
     assert device["state"] == "unverified" and device["run"] == 3 and device["runs"] == 3 and device["finished"]
     assert [r["state"] for r in device["results"]] == ["done", "done", "unverified"]
     assert device["results"][0]["verified_by"] == "operator" and device["results"][0]["model_calls"] == 1
-    assert "Lahore" not in json.dumps(session), "values are named, never shown"
+    assert "Berlin" not in json.dumps(session), "values are named, never shown"
     assert [s["id"] for s in a.client.get(f"{AI}/pilot/sessions").json()["sessions"]] == [sid]
     assert a.client.get(f"{AI}/pilot/sessions", params={"active": "true"}).json()["sessions"] == []
 
@@ -235,7 +235,7 @@ def test_a_pilot_session_over_http_from_start_to_trained_program(a):
     replay = a.wait(a.client.post("/api/automation/runs", json={"kind": "program", "name": "open-the-list", "selector": "2"}))
     assert replay["results"]["2"]["ok"] and a.devices[2].screen == "list"
     audit = [line for line in a.audit_lines() if line["path"] == f"{AI}/pilot"]
-    assert len(audit) == 1 and audit[0]["ids"] == [1] and "Lahore" not in json.dumps(a.audit_lines())
+    assert len(audit) == 1 and audit[0]["ids"] == [1] and "Berlin" not in json.dumps(a.audit_lines())
 
 
 def test_pilot_route_errors_and_steering(a):
@@ -417,10 +417,10 @@ def test_sf_ai_pilot_starts_follows_and_trains(stub, home, capsys):
         "warnings": ["trained from a single recording: nothing could be cross-checked."]}})
     stub.on("POST", "/api/ai/pilot/open-the-list/train", (202, {"task": trained}))
     result = run_sf(capsys, "--wait", "ai", "pilot", "Open the list", "1", "--app", PACKAGE, "--success", "text:The list",
-                    "--value", "city=Lahore", "--train")
+                    "--value", "city=Berlin", "--train")
     assert result.code == 0, result.err
     assert stub.calls("POST", "/api/ai/pilot")[0].json == {"goal": "Open the list", "package": PACKAGE, "selector": "1",
-                                                           "runs": 1, "success": "text:The list", "values": {"city": "Lahore"}}
+                                                           "runs": 1, "success": "text:The list", "values": {"city": "Berlin"}}
     assert "program open-the-list: 3 step(s)" in result.out and "! trained from a single recording" in result.out
     assert "sf auto run program open-the-list" in result.err and "goal reached" in result.out
 
@@ -447,3 +447,42 @@ def test_sf_ai_pilot_words(stub, home, capsys):
     assert confirmed.code == 0 and "r2 now counts for training" in confirmed.err
     assert stub.calls("POST", "/api/ai/pilot/sessions/t5/confirm")[0].json == {"instance": 1}
     assert run_sf(capsys, "ai", "pilot", "resolve", "t5", "1").code == 2
+
+
+# ------------------------------------------------------------- the Pilot as registry tools
+
+def test_the_pilot_tools_fit_the_registry(stub, home):
+    """pilot_tools.py is written to be added to ai/tools.py as two entries; this builds them
+    exactly as its docstring says and uses them through the HTTP client the registry uses."""
+    from superfarm.ai import pilot_tools, schema
+    from superfarm.ai.policy import CHANGE, READ, Policy, decide
+    from superfarm.ai.tools import Limits, Tool
+    from superfarm.cli.client import Api
+    from cli_fakes import TOKEN
+
+    start = Tool("pilot_start", "Teach a task with the AI Pilot", pilot_tools.START_DESCRIPTION, pilot_tools.START_SCHEMA,
+                 CHANGE, ("POST /api/ai/pilot",), pilot_tools.pilot_start, pilot_tools.describe_start, target="selector")
+    status = Tool("pilot_status", "Progress of a Pilot session", pilot_tools.STATUS_DESCRIPTION, pilot_tools.STATUS_SCHEMA,
+                  READ, ("GET /api/ai/pilot/sessions/{id}",), pilot_tools.pilot_status)
+    assert not schema.unsupported_keywords(start.input_schema) and not schema.unsupported_keywords(status.input_schema)
+    # Starting is a changing action (it waits for the operator under `ask`); reading progress is not.
+    assert decide(start.name, start.klass, Policy()).action == "ask" and decide(status.name, status.klass, Policy()).action == "allow"
+    args = start.validate({"goal": "Open the list", "package": PACKAGE, "selector": "tag:eu", "runs": 3, "success": "text:The list"})
+    assert start.summary(args, [1, 2]) == (f'Let a model operate "{PACKAGE}" on 2 Androids toward the goal "Open the list", '
+                                           "3 runs each, recording what it does: Android 1, 2")
+    for bad in ({"goal": "x", "package": PACKAGE, "selector": "1"}, {"goal": "Open it", "package": "nope", "selector": "1"},
+                {"goal": "Open it", "package": PACKAGE, "selector": "1", "values": {"pin": "1234"}}):
+        with pytest.raises(ValueError):
+            start.validate(bad)
+
+    api = Api(stub.url, TOKEN, timeout=10)
+    stub.on("POST", "/api/ai/pilot", (202, {"task": {**task("t5", title="pilot"), "targets": [1, 2]}}))
+    stub.on("GET", "/api/ai/pilot/sessions/t5", {"session": session(waiting=[1])})
+    started = start.call(api, args, limits=Limits())
+    assert started.structured == {"ok": True, "session": "t5", "next": "pilot_status(session='t5')"} and not started.is_error
+    assert stub.calls("POST", "/api/ai/pilot")[0].json == args
+    seen = status.call(api, status.validate({"session": "t5"}), limits=Limits())
+    assert seen.untrusted and "<<<DEVICE-CONTENT" in seen.text and "Waiting for the operator on Android 1" in seen.text
+    assert seen.structured["session"] == {"id": "t5", "state": "done", "dataset": "open-the-list", "counts": {"done": 1},
+                                          "recordings": 1, "unverified": 0, "waiting": [1]}
+    assert seen.structured["devices"]["1"]["results"] == [{"state": "done", "steps": 2, "model_calls": 3}]

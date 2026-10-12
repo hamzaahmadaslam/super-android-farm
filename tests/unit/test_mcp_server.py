@@ -126,7 +126,7 @@ def test_tools_are_still_listed_when_the_daemon_is_down_and_calls_say_what_is_wr
         return (await client.list_tools()).tools, await client.call_tool("farm_status", {})
 
     listed, result = talk(stub, body)
-    assert len(listed) == 36
+    assert len(listed) == 38
     assert result.is_error and text_of(result).startswith("The farm daemon is not running")
     assert result.structured_content["status"] == "daemon_down"
 

@@ -149,5 +149,5 @@ export function schemaForm(schema, value) {
     }
     return out;
   };
-  return { sections, paths, changes: () => diff(value, read()) };
+  return { sections, paths, changes: () => diff(value, read()), read };
 }

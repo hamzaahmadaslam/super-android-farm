@@ -8,5 +8,8 @@ live:   ## everything, including tests against real containers
 	scripts/check.sh --live
 hook:   ## refuse a push while a gate is failing
 	scripts/check.sh --install-hook
-docs:   ## regenerate the settings reference from the code
+docs:   ## regenerate every generated reference from the code
 	.venv/bin/sf config docs -o docs/CONFIGURATION.md
+	.venv/bin/python scripts/gen_cli_docs.py -o docs/CLI.md
+	.venv/bin/python scripts/gen_api_docs.py -o docs/API.md
+	.venv/bin/python scripts/gen_flow_docs.py

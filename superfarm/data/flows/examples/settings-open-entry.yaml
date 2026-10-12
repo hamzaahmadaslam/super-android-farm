@@ -1,0 +1,26 @@
+# Open one entry of Android's own Settings app and check that its page opened.
+#
+#   run the flow `examples/settings-open-entry`, optionally with  entry=Storage
+#
+# A small, complete flow to copy from: start an app fresh, wait for its first screen
+# by element (never by a fixed delay), scroll a list until an entry is visible, tap it,
+# and check the outcome. It uses only what a default farm Android has: the entries of
+# the Settings home screen. The search bar is not used because the default trim list
+# disables the app behind it (com.android.settings.intelligence).
+name: settings-open-entry
+description: Open Settings, scroll to an entry on its home screen, open it and wait for its page.
+package: com.android.settings
+variables:
+  entry: Accessibility     # the exact title of an entry on the Settings home screen
+timeouts:
+  step: 30
+  run: 180
+steps:
+  - launch: {fresh: true}
+  - wait_for: {id: homepage_title}
+    label: wait for the Settings home screen
+  - scroll_to: {id: title, text: "{entry}"}
+    max_swipes: 10
+  - tap: {id: title, text: "{entry}"}
+  - wait_for: {id: collapsing_toolbar, desc: "{entry}"}
+    label: wait for the page of the entry

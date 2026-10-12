@@ -1,0 +1,169 @@
+# GPU
+
+For anyone choosing how Androids draw: on the CPU, on an integrated or discrete GPU, or on an NVIDIA card through the relay.
+
+The rendering mode is the biggest lever on CPU load after the number of Androids. The numbers in the measured sections come from one test machine; [Scaling](SCALING.md) shows how they feed the capacity estimate.
+
+## The modes
+
+| Mode | What it does |
+| --- | --- |
+| `auto` | The best mode that works now. Never fails: with no usable GPU it draws on the CPU. |
+| `software` | Draws on the CPU (ANGLE with SwiftShader). Always works. |
+| `igpu` | The integrated GPU, whoever made it. |
+| `dgpu` | A discrete card, whoever made it. |
+| `intel` | An Intel GPU, through Mesa. |
+| `amd` | An AMD GPU, through Mesa. |
+| `nvidia` | An NVIDIA card, through the Venus relay. Needs the NVIDIA runtime to be built. |
+| exact card | A mode plus a pinned render node such as `/dev/dri/renderD129` (`gpu_node` per Android, `gpu.render_node` for the farm). The card must be one the mode allows. |
+
+Intel and AMD cards work out of the box. Android's graphics stack is Mesa, Mesa has drivers for those cards, and the Android container gets the card's render node. NVIDIA's proprietary driver is not Mesa, so NVIDIA Androids use a different path, described [below](#nvidia-through-the-relay).
+
+A mode you name must work, or the start of that Android fails with a message that says what is missing and lists the choices your machine does offer. `auto` falls back instead.
+
+## How auto chooses
+
+1. `gpu.prefer` decides which kind `auto` tries first when a machine has both: `dgpu` (the default) or `igpu`. Set `igpu` to keep the discrete card free for other work and to draw the least power.
+2. Within a kind, an NVIDIA card is tried first, because it is the fastest when its relay is available. A card is passed over, with the reason recorded, when the NVIDIA runtime is not built, the Vulkan driver manifest (`gpu.nvidia.icd`) is missing, or the relay does not start.
+3. Otherwise an Intel or AMD card of that kind is used.
+4. If the first kind has no usable card, the other kind is tried.
+5. If nothing is usable, `auto` draws on the CPU and the reason is shown.
+
+The decision is made again at every start and is deterministic: the same Android gets the same card unless the configuration changed, because a different card means a rebuilt container. On the test machine, which has an Intel iGPU and an NVIDIA card but no NVIDIA runtime in the default home, `auto` skipped the NVIDIA card and used the Intel iGPU. The reason appears in `sf host capacity` as "NVIDIA skipped: the Venus runtime or relay is not built".
+
+## See what this machine offers
+
+```bash
+sf host gpus
+```
+
+This reads `/sys` only, needs no daemon and no root. On the test machine:
+
+```text
+NODE                 VENDOR  KIND        NAME                                  DRIVER  VRAM      MODES   NOTE
+/dev/dri/renderD128  intel   integrated  Raptor Lake-S GT1 [UHD Graphics 770]  i915    -         intel   -
+/dev/dri/renderD129  nvidia  discrete    AD103 [GeForce RTX 4080 SUPER]        nvidia  16376 MB  nvidia  -
+
+Rendering modes usable now: software, igpu, intel
+NVIDIA is not usable yet: the Venus runtime or relay is not built (gpu_config.sh, vulkan.virtio.so, gralloc.venus.so and 4 more missing); build it with `.../native/venus/build.sh all` (see README.md next to it)
+```
+
+The `MODES` column is what each card can serve, `KIND` is integrated or discrete, and the last line lists the modes usable right now. `sf gpu ls` shows the same cards together with every rendering choice and why an unavailable one is unavailable (it needs the daemon). In the panel, the Rendering field of the New Android form and the per-Android settings lists the same choices with the reason under each unavailable one. `sf doctor` has the rows "GPUs", "Render node permissions" and, for NVIDIA, "NVIDIA driver", "NVIDIA Vulkan driver", "NVIDIA runtime for Android (Venus)" and "NVIDIA relay".
+
+How a card is classed: sysfs gives the driver and PCI position. An Intel card at PCI address `00:02.0` is the integrated GPU, and Intel Arc cards sit behind a PCIe port. NVIDIA cards are always discrete. For AMD the class is derived from the PCI layout (processor graphics sits on bus 00, or beside the processor's other functions) rather than from model names. That AMD logic was not exercised on AMD hardware.
+
+## Set the mode
+
+For the whole farm (the default Androids follow):
+
+```bash
+sf config set gpu.mode igpu
+```
+
+For new Androids as you create them:
+
+```bash
+sf create -n 4 --gpu intel
+```
+
+For one Android or a selection, and in bulk:
+
+```bash
+sf gpu set 1-8 igpu                                  # a selection
+sf gpu set 9 nvidia --node /dev/dri/renderD129       # pin one card
+sf gpu set 9 default                                  # follow gpu.mode again
+sf gpu set 9 nvidia --node ""                         # unpin the card
+sf set 3 gpu_mode=intel                               # the same through the general per-Android command
+```
+
+In the panel: Androids, tick the Androids, Change, Rendering…. A single Android's page has the same field under Settings. An emptied field returns the setting to the farm default.
+
+A change reaches an Android at its next restart. When the renderer changes, the container is rebuilt and the apps' compiled-shader caches are cleared (`gpu.clear_shader_cache_on_change`, on by default), because a cache built for another renderer makes apps crash at start. App data is kept.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `gpu.mode` | `auto` | Farm default mode. |
+| `gpu.prefer` | `dgpu` | Which kind `auto` tries first. |
+| `gpu.render_node` | empty | Force one `/dev/dri/renderD*` for intel, amd or nvidia. Empty detects by driver. |
+| `gpu.assignment` | `round-robin` | Which card a new Android gets when several fit. |
+| `gpu.clear_shader_cache_on_change` | `true` | Clear shader caches when the renderer changes. |
+| `gpu.nvidia.*` | | Runtime and relay locations, see below. |
+
+The reference for every `gpu.*` setting is [Configuration reference](CONFIGURATION.md#gpu).
+
+## Several GPUs
+
+When more than one usable card fits the chosen mode, `gpu.assignment` picks:
+
+- `round-robin` (default): by Android id, so Android N lands on card `N mod number-of-cards` and keeps it across restarts.
+- `first`: always the first card in node order.
+- `least-instances`: the card with the fewest running Androids.
+
+To put particular Androids on particular cards, pin them: `sf gpu set 9 nvidia --node /dev/dri/renderD129`, or use the exact-card entries in the panel's Rendering picker. A mode and a node that do not match (for example `igpu` with the NVIDIA node) fail with a message naming the card and why it cannot serve that mode.
+
+The NVIDIA relay is one process per card, shared by every Android on that card.
+
+## NVIDIA through the relay
+
+In plain words: an NVIDIA Android does not talk to the card directly. Inside Android, apps draw with OpenGL ES, which ANGLE (already in the image) turns into Vulkan. The Vulkan driver inside Android is a Mesa driver called Venus. Venus does not touch the card either: it sends the Vulkan calls over a unix socket to a relay program running on the host as your user (a patched `virgl_test_server`), and the relay calls NVIDIA's own Vulkan driver. Window and video buffers are allocated on the card by a small custom allocator and passed between Android processes as dma-bufs.
+
+What this means in practice:
+
+- You build the runtime and the relay yourself, once. [Install](INSTALL.md#nvidia-mode) lists the prerequisites and the command, and [native/venus/README.md](../native/venus/README.md) explains the design, the NVIDIA-specific findings and the rules for running the relay. The full build from source (`native/venus/build.sh all`) has not been run end to end. The test machine used a prebuilt runtime and relay.
+- The relay is started by the daemon before the first NVIDIA Android starts and is never restarted while Androids use it. If it stops, every NVIDIA Android on that card loses its graphics until it is restarted. That is why the user service uses `KillMode=process` and why the user service should have lingering enabled on a farm that must stay up ([Install](INSTALL.md#8-start-the-daemon)).
+- The runtime is built for Android 13 x86_64 only. 32-bit apps have no NVIDIA driver (the allocator is also built 32-bit, because Android 13's camera service is a 32-bit program). Other Android versions need a rebuild and have not been tried.
+- The farm refuses to claim NVIDIA mode where it is not ready: `auto` skips it and a named `nvidia` mode fails with the missing files listed.
+
+NVIDIA settings (the first two are not changeable through the API):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `gpu.nvidia.runtime_dir` | `<home>/overlays/venus` | Folder with `vulkan.virtio.so`, `gralloc.venus.so`, `gralloc.venus.x86.so`, `gpu_config.sh`. |
+| `gpu.nvidia.relay_dir` | `<home>/overlays/venus-relay` | Install prefix of the relay. API-immutable. |
+| `gpu.nvidia.icd` | `/usr/share/vulkan/icd.d/nvidia_icd.json` | The NVIDIA Vulkan driver manifest on the host. API-immutable. |
+| `gpu.nvidia.socket_dir` | `/run/superfarm/venus` | One socket folder per card. |
+| `gpu.nvidia.debug` | `false` | Verbose driver logging inside Android. Costs CPU. |
+
+## Measured numbers
+
+All from the one test machine (Intel Core i9-14900K, 32 threads, 32 GB, RTX 4080 SUPER and the Intel iGPU), Android 13 at 480x854. Treat them as starting points. A different app mix moves them a lot.
+
+Renderer strings that Android reported in each mode:
+
+| Mode | Renderer string |
+| --- | --- |
+| software | `ANGLE (… SwiftShader …)` |
+| Intel | `Mesa Intel(R) Graphics (RPL-S), OpenGL ES 3.2 Mesa 24.0.8` |
+| NVIDIA | `ANGLE (NVIDIA, Vulkan 1.3 (NVIDIA Virtio-GPU Venus (NVIDIA GeForce RTX 4080 SUPER)) …)` |
+
+| Measure | Software | Intel iGPU | NVIDIA |
+| --- | --- | --- | --- |
+| Time to boot | about 11 s | about 17 s | about 11 s |
+| CPU per Android, 13 Androids scrolling a settings screen | 78% of a core | 13% | 15% |
+| CPU per Android, 13 Androids in a live video app (the capacity estimate uses these) | 148% | 55% | 66% |
+| Memory per Android | not measured | about 0.9 to 1.1 GB in use | about 0.3 GB more than Intel |
+
+Other measurements:
+
+- Video memory: 17 NVIDIA Androids idling in an app held 7.6 GB on a 16 GB card, of which a desktop session accounted for about 1.5 GB. That is about 360 MB per Android at 480x854, from one measurement of one app.
+- The relay used about 0.6% of one core per Android in a live video.
+- Sixteen Linux containers and later 13 full Androids shared one relay with no errors.
+- NVIDIA mode saves CPU, not power: 13 Androids on the NVIDIA card drew about what 9 drew in software mode, and the integrated GPU was the cheapest per Android.
+- Software rendering costs roughly five times the CPU of a GPU mode on plain UI screens and more than twice in video.
+
+With the default settings the capacity estimate on the test machine is about 33 Androids in Intel mode, limited by RAM. The estimate and how it is computed are in [Scaling](SCALING.md).
+
+## Not verified
+
+- AMD: no AMD hardware was available. The code path is the same Mesa path as Intel, the AMD CPU figures in the capacity estimate are assumed equal to Intel's, and the integrated-versus-discrete detection for AMD has never run on a real AMD machine.
+- NVIDIA on Android versions other than 13, and 32-bit apps on NVIDIA.
+- Hardware video decoding on the card. Video is decoded on the CPU.
+- Only one card model and one driver series (an RTX 40-series card, NVIDIA open kernel module 595) were tested.
+- Intel Arc and multi-card machines. The assignment rules are unit-tested, and the test machine has one card of each vendor.
+
+## Next
+
+- [Install](INSTALL.md): the NVIDIA prerequisites and the build command.
+- [Scaling](SCALING.md): how the rendering mode feeds the capacity estimate.
+- [Troubleshooting](TROUBLESHOOTING.md): what to do when a mode is unavailable or apps crash after a renderer change.
+- [Configuration reference](CONFIGURATION.md#gpu): every `gpu.*` setting.
