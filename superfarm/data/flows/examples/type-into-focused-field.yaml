@@ -1,0 +1,17 @@
+# Type a value into whichever field has focus right now.
+#
+#   run the flow `examples/type-into-focused-field` with the variable  text=hello there
+#
+# `text` can also come from the shared values or a device's own values (a value with
+# the same name), or from a pool - one line per device, each used once:
+#
+#   - call: examples/type-into-focused-field
+#     with: {text: "{pool.invite_codes}"}
+name: type-into-focused-field
+description: Replace the content of the focused text field with a value.
+variables:
+  text: null             # required
+steps:
+  - wait_for: {editable: true, focused: true}
+    label: wait for a text field to have focus
+  - type: {text: "{text}", clear: true}

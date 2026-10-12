@@ -1,0 +1,36 @@
+# Answer Android's runtime permission dialog, if one is showing.
+#
+#   run the flow `examples/dismiss-permission-dialog`, optionally with  answer=deny
+#
+# Does nothing (and succeeds) when no permission dialog is on screen, so another flow
+# can call it right after an action that may trigger one:
+#
+#   - call: examples/dismiss-permission-dialog
+#
+# To have a flow clear the dialog whenever it appears, keep the same thing as an
+# overlay rule instead. It fires only when the message AND the button are both there:
+#
+#   overlays:
+#     - name: permission
+#       guard: {id: "com.android.permissioncontroller:id/permission_message"}
+#       dismiss: {id: "com.android.permissioncontroller:id/permission_allow_button"}
+name: dismiss-permission-dialog
+description: Allow (or deny) a runtime permission request if one is on screen.
+variables:
+  answer: allow          # allow | deny
+steps:
+  - if: {visible: {id: "com.android.permissioncontroller:id/permission_message"}}
+    then:
+      - if: {equals: ["{answer}", "deny"]}
+        then:
+          - tap: {id: "com.android.permissioncontroller:id/permission_deny_button"}
+        else:
+          # Location, camera and microphone offer "While using the app" instead of
+          # a plain "Allow"; everything else has the plain button.
+          - if: {visible: {id: "com.android.permissioncontroller:id/permission_allow_foreground_only_button"}}
+            then:
+              - tap: {id: "com.android.permissioncontroller:id/permission_allow_foreground_only_button"}
+            else:
+              - tap: {id: "com.android.permissioncontroller:id/permission_allow_button"}
+      - wait_gone: {id: "com.android.permissioncontroller:id/permission_message"}
+        timeout: 10

@@ -1,0 +1,18 @@
+[constants]
+ndk = '/ndk/toolchains/llvm/prebuilt/linux-x86_64'
+api = '33'
+[binaries]
+c = [ndk + '/bin/x86_64-linux-android' + api + '-clang']
+cpp = [ndk + '/bin/x86_64-linux-android' + api + '-clang++']
+ar = ndk + '/bin/llvm-ar'
+strip = ndk + '/bin/llvm-strip'
+c_ld = 'lld'
+cpp_ld = 'lld'
+pkg-config = '/w/pkgconf-android'
+[host_machine]
+system = 'android'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+[built-in options]
+default_library = 'shared'

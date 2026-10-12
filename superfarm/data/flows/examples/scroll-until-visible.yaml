@@ -1,0 +1,15 @@
+# Scroll the current list down until some text is on screen.
+#
+#   run the flow `examples/scroll-until-visible` with the variable  text=System
+#
+# Stops as soon as the text is visible, and fails clearly when the end of the list
+# is reached without it (the screen stops changing) or after 15 swipes.
+name: scroll-until-visible
+description: Scroll down until an element with the given text is visible.
+variables:
+  text: null             # required: the exact text to find
+steps:
+  - scroll_to: {text: "{text}"}
+    max_swipes: 15
+  - assert: {visible: {text: "{text}"}}
+    message: the text is on screen after scrolling

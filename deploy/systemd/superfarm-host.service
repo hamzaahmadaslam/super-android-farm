@@ -1,0 +1,50 @@
+# Super Farm host preparation, once per boot, as root.
+#
+# Re-establishes what a reboot throws away: kernel modules (loaded by name, because module
+# auto-loading cannot be relied on), binder, compressed swap, same-page merging, the
+# virtual camera devices and the /run/superfarm folders with the farm group as owner.
+# Nothing here writes configuration; that is done once by `sudo sf host apply`.
+#
+# This is the same code as `sf host apply --boot`, called through the module so the unit
+# keeps working whatever the command-line front end looks like.
+#
+# Security note: root runs Python from the farm user's virtual environment and reads that
+# user's config.yaml. The farm user is a member of the docker group, which already equals
+# root on this machine, so this grants nothing new. The values root acts on are validated
+# numbers and fixed names, and root only creates folders below /run/superfarm.
+
+[Unit]
+Description=Super Farm host preparation (modules, limits, cameras, runtime folders)
+After=local-fs.target systemd-modules-load.service systemd-sysctl.service systemd-tmpfiles-setup.service
+Before=docker.service superfarm.service
+# The farm may live on a drive that is not mounted at boot; skip quietly in that case.
+ConditionPathExists=@PYTHON@
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Environment=SUPERFARM_HOME=@SUPERFARM_HOME@
+Environment=SUPERFARM_BOOT=1
+Environment=SUPERFARM_USER=@USER@
+Environment=SUPERFARM_GROUP=@RUN_GROUP@
+ExecStart=@PYTHON@ -m superfarm.host.setup apply --boot
+TimeoutStartSec=180
+
+# Root, but only with what the steps need: load modules, set up swap, create device nodes
+# and folders, change their owner.
+CapabilityBoundingSet=CAP_SYS_MODULE CAP_SYS_ADMIN CAP_MKNOD CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+ProtectHostname=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+# Not set: ProtectKernelModules / ProtectKernelTunables (loading modules and writing /sys
+# is the job), PrivateDevices / ProtectClock (need /dev/zram*, /dev/v4l2loopback),
+# RestrictSUIDSGID (the runtime folders are created setgid on purpose).
+
+[Install]
+WantedBy=multi-user.target

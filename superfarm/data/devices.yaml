@@ -1,0 +1,276 @@
+# Device presets: what an Android reports about itself (Build.BRAND, Build.MODEL, ...).
+#
+# `sf device profiles` lists them; `device.profile` in config.yaml (or per instance) picks one,
+# `random` draws one per new Android, `none` keeps the image's own identity.
+#
+# Rules for this file
+#   * No whitespace in any value. The Android container receives these as boot arguments and
+#     splits its command line on spaces: "Pixel 7" arrives as model "Pixel" plus a stray "7".
+#     That is why phones whose model name contains a space (Pixel, moto, Nokia ...) are absent.
+#   * brand / manufacturer / model / device / name map to ro.product.<key>.
+#   * screen is the phone's native panel (pixels, density). A farm does not render at that size:
+#     `profile_screen()` scales it to a chosen width, keeping the aspect ratio and the
+#     density-independent width, so layouts look like the phone's at a fraction of the cost.
+#   * Values are the commonly published ones for the international variant. They are a
+#     plausible identity, not a guarantee of matching one exact retail firmware.
+
+samsung-s23-ultra:
+  label: Samsung Galaxy S23 Ultra
+  brand: samsung
+  manufacturer: samsung
+  model: SM-S918B
+  device: dm3q
+  name: dm3qxxx
+  screen: {width: 1440, height: 3088, dpi: 600}
+
+samsung-s23:
+  label: Samsung Galaxy S23
+  brand: samsung
+  manufacturer: samsung
+  model: SM-S911B
+  device: dm1q
+  name: dm1qxxx
+  screen: {width: 1080, height: 2340, dpi: 480}
+
+samsung-s22:
+  label: Samsung Galaxy S22
+  brand: samsung
+  manufacturer: samsung
+  model: SM-S901B
+  device: r0s
+  name: r0sxxx
+  screen: {width: 1080, height: 2340, dpi: 480}
+
+samsung-s21-fe:
+  label: Samsung Galaxy S21 FE
+  brand: samsung
+  manufacturer: samsung
+  model: SM-G990B
+  device: r9s
+  name: r9sxxx
+  screen: {width: 1080, height: 2340, dpi: 450}
+
+samsung-a54:
+  label: Samsung Galaxy A54 5G
+  brand: samsung
+  manufacturer: samsung
+  model: SM-A546B
+  device: a54x
+  name: a54xnsxx
+  screen: {width: 1080, height: 2340, dpi: 450}
+
+samsung-a53:
+  label: Samsung Galaxy A53 5G
+  brand: samsung
+  manufacturer: samsung
+  model: SM-A536B
+  device: a53x
+  name: a53xnsxx
+  screen: {width: 1080, height: 2400, dpi: 450}
+
+samsung-a34:
+  label: Samsung Galaxy A34 5G
+  brand: samsung
+  manufacturer: samsung
+  model: SM-A346B
+  device: a34x
+  name: a34xnsxx
+  screen: {width: 1080, height: 2340, dpi: 450}
+
+samsung-a14:
+  label: Samsung Galaxy A14
+  brand: samsung
+  manufacturer: samsung
+  model: SM-A145F
+  device: a14
+  name: a14nsxx
+  screen: {width: 1080, height: 2408, dpi: 450}
+
+samsung-m33:
+  label: Samsung Galaxy M33 5G
+  brand: samsung
+  manufacturer: samsung
+  model: SM-M336B
+  device: m33x
+  name: m33xnsxx
+  screen: {width: 1080, height: 2408, dpi: 450}
+
+xiaomi-13:
+  label: Xiaomi 13
+  brand: Xiaomi
+  manufacturer: Xiaomi
+  model: 2211133G
+  device: fuxi
+  name: fuxi_global
+  screen: {width: 1080, height: 2400, dpi: 440}
+
+xiaomi-12:
+  label: Xiaomi 12
+  brand: Xiaomi
+  manufacturer: Xiaomi
+  model: 2201123G
+  device: cupid
+  name: cupid_global
+  screen: {width: 1080, height: 2400, dpi: 440}
+
+redmi-note-12:
+  label: Redmi Note 12
+  brand: Redmi
+  manufacturer: Xiaomi
+  model: 23021RAAEG
+  device: tapas
+  name: tapas_global
+  screen: {width: 1080, height: 2400, dpi: 440}
+
+redmi-note-11:
+  label: Redmi Note 11
+  brand: Redmi
+  manufacturer: Xiaomi
+  model: 2201117TG
+  device: spes
+  name: spes_global
+  screen: {width: 1080, height: 2400, dpi: 440}
+
+poco-x5-pro:
+  label: POCO X5 Pro 5G
+  brand: POCO
+  manufacturer: Xiaomi
+  model: 22101320G
+  device: redwood
+  name: redwood_global
+  screen: {width: 1080, height: 2400, dpi: 440}
+
+poco-f5:
+  label: POCO F5
+  brand: POCO
+  manufacturer: Xiaomi
+  model: 23049PCD8G
+  device: marble
+  name: marble_global
+  screen: {width: 1080, height: 2400, dpi: 440}
+
+oneplus-11:
+  label: OnePlus 11
+  brand: OnePlus
+  manufacturer: OnePlus
+  model: CPH2449
+  device: OP594DL1
+  name: CPH2449EEA
+  screen: {width: 1440, height: 3216, dpi: 560}
+
+oneplus-10-pro:
+  label: OnePlus 10 Pro
+  brand: OnePlus
+  manufacturer: OnePlus
+  model: NE2213
+  device: OP515BL1
+  name: NE2213EEA
+  screen: {width: 1440, height: 3216, dpi: 560}
+
+oneplus-9:
+  label: OnePlus 9
+  brand: OnePlus
+  manufacturer: OnePlus
+  model: LE2113
+  device: OnePlus9
+  name: OnePlus9_EEA
+  screen: {width: 1080, height: 2400, dpi: 420}
+
+oppo-find-x5-pro:
+  label: OPPO Find X5 Pro
+  brand: OPPO
+  manufacturer: OPPO
+  model: CPH2305
+  device: OP52D1L1
+  name: CPH2305EEA
+  screen: {width: 1440, height: 3216, dpi: 560}
+
+realme-gt:
+  label: realme GT 5G
+  brand: realme
+  manufacturer: realme
+  model: RMX2202
+  device: RMX2202L1
+  name: RMX2202
+  screen: {width: 1080, height: 2400, dpi: 480}
+
+vivo-v27:
+  label: vivo V27
+  brand: vivo
+  manufacturer: vivo
+  model: V2231
+  device: V2231
+  name: V2231
+  screen: {width: 1080, height: 2400, dpi: 480}
+
+vivo-y36:
+  label: vivo Y36
+  brand: vivo
+  manufacturer: vivo
+  model: V2247
+  device: V2247
+  name: V2247
+  screen: {width: 1080, height: 2388, dpi: 440}
+
+sony-xperia-1-iv:
+  label: Sony Xperia 1 IV
+  brand: Sony
+  manufacturer: Sony
+  model: XQ-CT54
+  device: XQ-CT54
+  name: XQ-CT54_EEA
+  screen: {width: 1096, height: 2560, dpi: 420}
+
+sony-xperia-5-iv:
+  label: Sony Xperia 5 IV
+  brand: Sony
+  manufacturer: Sony
+  model: XQ-CQ54
+  device: XQ-CQ54
+  name: XQ-CQ54_EEA
+  screen: {width: 1080, height: 2520, dpi: 420}
+
+asus-zenfone-9:
+  label: ASUS Zenfone 9
+  brand: asus
+  manufacturer: asus
+  model: ASUS_AI2202
+  device: ASUS_AI2202
+  name: WW_AI2202
+  screen: {width: 1080, height: 2400, dpi: 440}
+
+nothing-phone-1:
+  label: Nothing Phone (1)
+  brand: Nothing
+  manufacturer: Nothing
+  model: A063
+  device: Spacewar
+  name: Spacewar
+  screen: {width: 1080, height: 2400, dpi: 420}
+
+honor-90:
+  label: HONOR 90
+  brand: HONOR
+  manufacturer: HONOR
+  model: REA-NX9
+  device: HNREA
+  name: REA-NX9
+  screen: {width: 1200, height: 2664, dpi: 480}
+
+nubia-redmagic-8-pro:
+  label: REDMAGIC 8 Pro
+  brand: nubia
+  manufacturer: nubia
+  model: NX729J
+  device: NX729J
+  name: NX729J-EEA
+  screen: {width: 1116, height: 2480, dpi: 400}
+
+fairphone-4:
+  label: Fairphone 4
+  brand: Fairphone
+  manufacturer: Fairphone
+  model: FP4
+  device: FP4
+  name: FP4eea
+  screen: {width: 1080, height: 2340, dpi: 420}

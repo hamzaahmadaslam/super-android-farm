@@ -1,0 +1,18 @@
+# Open an app and wait until it is really in front.
+#
+#   run the flow `examples/open-app` with the variable  package=com.android.settings
+#
+# Works for any app: nothing here knows what the app's first screen looks like, only
+# that the app must be the one in the foreground. To wait for a specific screen
+# instead, copy this flow and replace the wait_for with a selector of that screen,
+# e.g.  - wait_for: {id: main_toolbar}
+name: open-app
+description: Start an app (from a clean state) and wait for it to be in the foreground.
+variables:
+  package: null          # required: the app to open, e.g. com.android.settings
+timeouts:
+  step: 30
+steps:
+  - launch: {package: "{package}", fresh: true}
+  - wait_for: {app: "{package}"}
+    label: wait for the app to be in front

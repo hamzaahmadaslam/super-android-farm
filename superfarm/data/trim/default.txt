@@ -1,0 +1,25 @@
+# Fallback list for Android versions without their own file in this folder.
+#
+# Deliberately shorter than 13.txt: only user-facing apps and decorations whose absence
+# cannot affect another app on any AOSP release. System plumbing (Bluetooth, NFC, backup
+# transports, provisioning) changed names and roles between releases, so it is only listed
+# in a per-version file after that version was checked on a real Android.
+#
+# Names that do not exist on a given release are skipped silently.
+
+com.android.deskclock
+com.android.calendar
+com.android.quicksearchbox
+com.android.gallery3d
+com.android.htmlviewer
+org.chromium.webview_shell
+com.android.printspooler
+com.android.bips
+com.android.printservice.recommendation
+com.android.egg
+com.android.dreams.basic
+com.android.dreams.phototable
+com.android.wallpaper.livepicker
+com.android.bookmarkprovider
+com.android.musicfx
+com.android.traceur

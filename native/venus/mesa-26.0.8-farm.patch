@@ -1,0 +1,593 @@
+diff -ruN a/src/virtio/vtest/vtest_protocol.h b/src/virtio/vtest/vtest_protocol.h
+--- a/src/virtio/vtest/vtest_protocol.h
++++ b/src/virtio/vtest/vtest_protocol.h
+@@ -93,6 +93,12 @@
+ #define VCMD_DRM_SYNC_QUERY 36
+ #define VCMD_DRM_SYNC_TRANSFER 37
+ #define VCMD_RESOURCE_EXPORT_FD 38
++/* farm: import a dma-buf the client already holds (sent as SCM_RIGHTS right
++ * after the command) as a HOST3D blob resource. resp: res_id */
++#define VCMD_RESOURCE_IMPORT_FD 39
++#define VCMD_RESOURCE_IMPORT_FD_SIZE 2
++#define VCMD_RESOURCE_IMPORT_FD_SIZE_LO 0
++#define VCMD_RESOURCE_IMPORT_FD_SIZE_HI 1
+ 
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+diff -ruN a/src/virtio/vulkan/vn_android.c b/src/virtio/vulkan/vn_android.c
+--- a/src/virtio/vulkan/vn_android.c
++++ b/src/virtio/vulkan/vn_android.c
+@@ -14,6 +14,7 @@
+ #include <vndk/hardware_buffer.h>
+ 
+ #include "util/os_file.h"
++#include "util/log.h"
+ #include "util/u_gralloc/u_gralloc.h"
+ #include "vk_android.h"
+ 
+@@ -52,12 +53,12 @@
+    };
+ 
+    if (u_gralloc_get_buffer_basic_info(gralloc, &ugb_handle, &info) != 0) {
+-      vn_log(NULL, "u_gralloc_get_buffer_basic_info failed");
++      mesa_loge("u_gralloc_get_buffer_basic_info failed");
+       return false;
+    }
+ 
+    if (info.modifier == DRM_FORMAT_MOD_INVALID) {
+-      vn_log(NULL, "Unexpected DRM_FORMAT_MOD_INVALID");
++      mesa_loge("Unexpected DRM_FORMAT_MOD_INVALID");
+       return false;
+    }
+ 
+@@ -101,12 +102,12 @@
+    assert(handle);
+ 
+    if (handle->numFds < 1) {
+-      vn_log(NULL, "handle->numFds is %d, expected >= 1", handle->numFds);
++      mesa_loge("handle->numFds is %d, expected >= 1", handle->numFds);
+       return -1;
+    }
+ 
+    if (handle->data[0] < 0) {
+-      vn_log(NULL, "handle->data[0] < 0");
++      mesa_loge("handle->data[0] < 0");
+       return -1;
+    }
+ 
+@@ -270,13 +271,13 @@
+       img = *out_img;
+       result = vn_image_init_deferred(dev, &builder.create, img);
+       if (result != VK_SUCCESS) {
+-         vn_log(dev->instance, "anb: vn_image_init_deferred failed");
++         mesa_loge("anb: vn_image_init_deferred failed");
+          return result;
+       }
+    } else {
+       result = vn_image_create(dev, &builder.create, alloc, &img);
+       if (result != VK_SUCCESS) {
+-         vn_log(dev->instance, "anb: vn_image_create failed");
++         mesa_loge("anb: vn_image_create failed");
+          return result;
+       }
+    }
+@@ -296,21 +297,24 @@
+       &img->requirements[0].memory.memoryRequirements;
+    mem_type_bits &= mem_req->memoryTypeBits;
+    if (!mem_type_bits) {
+-      vn_log(dev->instance, "anb: no compatible mem type");
++      mesa_loge("anb: no compatible mem type");
+       result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+       goto fail;
+    }
+ 
+    int dup_fd = os_dupfd_cloexec(dma_buf_fd);
+    if (dup_fd < 0) {
+-      vn_log(dev->instance, "anb: os_dupfd_cloexec failed(%d)", errno);
++      mesa_loge("anb: os_dupfd_cloexec failed(%d)", errno);
+       result = (errno == EMFILE) ? VK_ERROR_TOO_MANY_OBJECTS
+                                  : VK_ERROR_OUT_OF_HOST_MEMORY;
+       goto fail;
+    }
+ 
+-   const bool prefer_dedicated =
+-      img->requirements[0].dedicated.prefersDedicatedAllocation == VK_TRUE;
++   /* farm: NVIDIA reports prefersDedicatedAllocation false for these images
++    * yet rejects a non-dedicated dma-buf import with OUT_OF_DEVICE_MEMORY for
++    * most sizes and tiled layouts (measured on an RTX 4080 SUPER, driver
++    * 595.99); a dedicated import always works. */
++   const bool prefer_dedicated = true;
+    const VkMemoryDedicatedAllocateInfo dedicated_info = {
+       .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+       .image = vn_image_to_handle(img),
+@@ -331,7 +335,7 @@
+    result = vn_AllocateMemory(vn_device_to_handle(dev), &memory_info, alloc,
+                               &mem_handle);
+    if (result != VK_SUCCESS) {
+-      vn_log(dev->instance, "anb: mem import failed");
++      mesa_loge("anb: mem import failed");
+       /* only need to close the dup_fd on import failure */
+       close(dup_fd);
+       goto fail;
+@@ -406,13 +410,17 @@
+    const native_handle_t *handle =
+       AHardwareBuffer_getNativeHandle(mem_vk->ahardware_buffer);
+    int dma_buf_fd = vn_android_gralloc_get_dma_buf_fd(handle);
+-   if (dma_buf_fd < 0)
++   if (dma_buf_fd < 0) {
++      mesa_loge("farm ahb import: no dma-buf fd");
+       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
+ 
+    uint32_t mem_type_bits = 0;
+    result = vn_get_memory_dma_buf_properties(dev, dma_buf_fd, &mem_type_bits);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      mesa_loge("farm ahb import: dma-buf properties failed: %d", result);
+       return result;
++   }
+ 
+    const VkMemoryDedicatedAllocateInfo *dedicated_info =
+       vk_find_struct_const(alloc_info->pNext, MEMORY_DEDICATED_ALLOCATE_INFO);
+@@ -425,12 +433,19 @@
+       struct vn_android_image_builder builder;
+       result = vn_android_get_image_builder(dev, &img->deferred_info->create,
+                                             handle, &builder);
+-      if (result != VK_SUCCESS)
++      if (result != VK_SUCCESS) {
++         mesa_loge("farm ahb import: image builder failed: %d", result);
+          return result;
++      }
+ 
+       result = vn_image_init_deferred(dev, &builder.create, img);
+-      if (result != VK_SUCCESS)
++      if (result != VK_SUCCESS) {
++         mesa_loge("farm ahb import: deferred image %ux%u fmt %d usage 0x%x flags 0x%x mod 0x%llx failed: %d",
++                   builder.create.extent.width, builder.create.extent.height, builder.create.format,
++                   builder.create.usage, builder.create.flags,
++                   (unsigned long long)builder.modifier.drmFormatModifier, result);
+          return result;
++      }
+ 
+       mem_reqs = img->requirements[0].memory.memoryRequirements;
+       mem_reqs.memoryTypeBits &= mem_type_bits;
+@@ -443,8 +458,10 @@
+       mem_reqs.memoryTypeBits = mem_type_bits;
+    }
+ 
+-   if (!mem_reqs.memoryTypeBits)
++   if (!mem_reqs.memoryTypeBits) {
++      mesa_loge("farm ahb import: no common memory type (dma-buf 0x%x)", mem_type_bits);
+       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
+ 
+    if (!((1 << mem_vk->memory_type_index) & mem_reqs.memoryTypeBits))
+       mem_vk->memory_type_index = ffs(mem_reqs.memoryTypeBits) - 1;
+@@ -476,6 +493,8 @@
+    result =
+       vn_device_memory_import_dma_buf(dev, mem, &local_alloc_info, dup_fd);
+    if (result != VK_SUCCESS) {
++      mesa_loge("farm ahb import: memory import of %llu bytes type %u dedicated %d failed: %d",
++                (unsigned long long)mem_vk->size, mem_vk->memory_type_index, dedicated_info != NULL, result);
+       close(dup_fd);
+       return result;
+    }
+diff -ruN a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+diff -ruN a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
+--- a/src/virtio/vulkan/vn_physical_device.c
++++ b/src/virtio/vulkan/vn_physical_device.c
+@@ -10,6 +10,8 @@
+ 
+ #include "vn_physical_device.h"
+ 
++#include "util/log.h"
++
+ #include <stdio.h>
+ 
+ #include "git_sha1.h"
+@@ -1042,8 +1044,11 @@
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+ 
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
++      /* farm: gralloc.venus allocates its buffers through this driver and
++       * exports them as dma-bufs, so Android gets the fd handle types too. */
+       physical_dev->external_memory.supported_handle_types |=
+-         VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
++         VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID |
++         VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+ #else
+       physical_dev->external_memory.supported_handle_types =
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
+@@ -1184,6 +1189,9 @@
+        renderer_exts->EXT_image_drm_format_modifier &&
+        renderer_exts->EXT_queue_family_foreign) {
+       exts->ANDROID_external_memory_android_hardware_buffer = true;
++      /* farm: see supported_handle_types above */
++      exts->KHR_external_memory_fd = true;
++      exts->EXT_external_memory_dma_buf = true;
+ 
+       /* For wsi, we require renderer:
+        * - semaphore sync fd import for queue submission to skip scrubbing the
+@@ -2798,8 +2806,14 @@
+       if (external_info->handleType ==
+           VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
+          assert(physical_dev->instance->renderer->info.has_dma_buf_import);
+-         return vn_get_ahb_image_props(physical_dev, pImageFormatInfo,
+-                                       pImageFormatProperties);
++         const VkResult ahb_result = vn_get_ahb_image_props(
++            physical_dev, pImageFormatInfo, pImageFormatProperties);
++         if (ahb_result != VK_SUCCESS)
++            mesa_loge("farm: AHB image props fmt %d type %d tiling %d usage 0x%x flags 0x%x -> %d",
++                      pImageFormatInfo->format, pImageFormatInfo->type,
++                      pImageFormatInfo->tiling, pImageFormatInfo->usage,
++                      pImageFormatInfo->flags, ahb_result);
++         return ahb_result;
+       }
+    }
+ 
+diff -ruN a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
+--- a/src/virtio/vulkan/vn_queue.c
++++ b/src/virtio/vulkan/vn_queue.c
+@@ -1908,6 +1908,23 @@
+       return vn_error(dev->instance, result);
+    }
+ 
++   if (!dev->renderer->sync_ops.export_syncobj) {
++      /* farm: vtest cannot export a sync file. Wait here for the work to
++       * finish and hand out -1, which callers treat as "already signaled". */
++      const struct vn_renderer_wait wait = {
++         .wait_any = false,
++         .timeout = UINT64_MAX,
++         .syncs = &sync,
++         .sync_values = &(const uint64_t){ 1 },
++         .sync_count = 1,
++      };
++      result = vn_renderer_wait(dev->renderer, &wait);
++      vn_renderer_sync_destroy(dev->renderer, sync);
++      *out_fd = -1;
++      return result == VK_SUCCESS ? VK_SUCCESS
++                                  : vn_error(dev->instance, VK_ERROR_DEVICE_LOST);
++   }
++
+    *out_fd = vn_renderer_sync_export_syncobj(dev->renderer, sync, true);
+    vn_renderer_sync_destroy(dev->renderer, sync);
+ 
+diff -ruN a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
+--- a/src/virtio/vulkan/vn_renderer_vtest.c
++++ b/src/virtio/vulkan/vn_renderer_vtest.c
+@@ -350,6 +350,58 @@
+ }
+ 
+ static void
++vtest_send_fd(struct vtest *vtest, int fd)
++{
++   char cmsg_buf[CMSG_SPACE(sizeof(int))] = { 0 };
++   char dummy = 0;
++   struct msghdr msg = {
++      .msg_iov =
++         &(struct iovec){
++            .iov_base = &dummy,
++            .iov_len = sizeof(dummy),
++         },
++      .msg_iovlen = 1,
++      .msg_control = cmsg_buf,
++      .msg_controllen = sizeof(cmsg_buf),
++   };
++   struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++   cmsg->cmsg_level = SOL_SOCKET;
++   cmsg->cmsg_type = SCM_RIGHTS;
++   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
++   *((int *)CMSG_DATA(cmsg)) = fd;
++
++   if (sendmsg(vtest->sock_fd, &msg, 0) < 0) {
++      vn_log(vtest->instance, "sendmsg failed: %s", strerror(errno));
++      abort();
++   }
++}
++
++/* farm: hand a dma-buf this process already holds to the vtest server */
++static uint32_t
++vtest_vcmd_resource_import_fd(struct vtest *vtest, VkDeviceSize size, int fd)
++{
++   uint32_t vtest_hdr[VTEST_HDR_SIZE];
++   uint32_t vcmd[VCMD_RESOURCE_IMPORT_FD_SIZE];
++
++   vtest_hdr[VTEST_CMD_LEN] = VCMD_RESOURCE_IMPORT_FD_SIZE;
++   vtest_hdr[VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_FD;
++   vcmd[VCMD_RESOURCE_IMPORT_FD_SIZE_LO] = (uint32_t)size;
++   vcmd[VCMD_RESOURCE_IMPORT_FD_SIZE_HI] = (uint32_t)(size >> 32);
++
++   vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
++   vtest_write(vtest, vcmd, sizeof(vcmd));
++   vtest_send_fd(vtest, fd);
++
++   vtest_read(vtest, vtest_hdr, sizeof(vtest_hdr));
++   assert(vtest_hdr[VTEST_CMD_LEN] == 1);
++   assert(vtest_hdr[VTEST_CMD_ID] == VCMD_RESOURCE_IMPORT_FD);
++
++   uint32_t res_id;
++   vtest_read(vtest, &res_id, sizeof(res_id));
++   return res_id;
++}
++
++static void
+ vtest_vcmd_resource_unref(struct vtest *vtest, uint32_t res_id)
+ {
+    uint32_t vtest_hdr[VTEST_HDR_SIZE];
+@@ -778,6 +830,51 @@
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++vtest_bo_create_from_dma_buf(struct vn_renderer *renderer,
++                             VkDeviceSize size,
++                             int fd,
++                             VkMemoryPropertyFlags flags,
++                             struct vn_renderer_bo **out_bo)
++{
++   struct vtest *vtest = (struct vtest *)renderer;
++
++   const off_t real_size = lseek(fd, 0, SEEK_END);
++   if (real_size > 0 && (VkDeviceSize)real_size > size)
++      size = real_size;
++
++   int res_fd = os_dupfd_cloexec(fd);
++   if (res_fd < 0)
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++
++   mtx_lock(&vtest->sock_mutex);
++   uint32_t res_id = vtest_vcmd_resource_import_fd(vtest, size, fd);
++   mtx_unlock(&vtest->sock_mutex);
++   if (!res_id) {
++      close(res_fd);
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
++
++   uint32_t blob_flags = VCMD_BLOB_FLAG_SHAREABLE | VCMD_BLOB_FLAG_CROSS_DEVICE;
++   if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
++      blob_flags |= VCMD_BLOB_FLAG_MAPPABLE;
++
++   struct vtest_bo *bo = util_sparse_array_get(&vtest->bo_array, res_id);
++   *bo = (struct vtest_bo){
++      .base = {
++         .refcount = VN_REFCOUNT_INIT(1),
++         .res_id = res_id,
++         .mmap_size = size,
++      },
++      .res_fd = res_fd,
++      .blob_flags = blob_flags,
++   };
++
++   *out_bo = &bo->base;
++
++   return VK_SUCCESS;
++}
++
+ static void
+ vtest_shmem_destroy_now(struct vn_renderer *renderer,
+                         struct vn_renderer_shmem *_shmem)
+@@ -930,7 +1027,7 @@
+    info->pci.vendor_id = VTEST_PCI_VENDOR_ID;
+    info->pci.device_id = VTEST_PCI_DEVICE_ID;
+ 
+-   info->has_dma_buf_import = false;
++   info->has_dma_buf_import = true;
+    info->has_external_sync = false;
+    info->has_implicit_fencing = false;
+ 
+@@ -1070,7 +1167,7 @@
+ 
+    vtest->base.bo_ops.create_from_device_memory =
+       vtest_bo_create_from_device_memory;
+-   vtest->base.bo_ops.create_from_dma_buf = NULL;
++   vtest->base.bo_ops.create_from_dma_buf = vtest_bo_create_from_dma_buf;
+    vtest->base.bo_ops.destroy = vtest_bo_destroy;
+    vtest->base.bo_ops.export_dma_buf = vtest_bo_export_dma_buf;
+    vtest->base.bo_ops.export_sync_file =
+diff -ruN a/src/vulkan/runtime/vk_android.c b/src/vulkan/runtime/vk_android.c
+--- a/src/vulkan/runtime/vk_android.c
++++ b/src/vulkan/runtime/vk_android.c
+@@ -921,8 +921,10 @@
+ 
+    if (format_prop2) {
+       result = get_ahb_buffer_format_properties2(device, buffer, format_prop2);
+-      if (result != VK_SUCCESS)
++      if (result != VK_SUCCESS) {
++         mesa_loge("farm ahb: format properties failed: %d", result);
+          return result;
++      }
+    }
+ 
+    if (format_prop) {
+@@ -966,6 +968,13 @@
+ 
+    pProperties->memoryTypeBits = fd_props.memoryTypeBits;
+ 
++   /* farm: on NVIDIA a dma-buf reports only memory types without the
++    * DEVICE_LOCAL flag, and ANGLE gives up before asking the driver when it
++    * finds no DEVICE_LOCAL type here. Venus replaces an unusable type index
++    * with a valid one when it imports the buffer, so offering every type is
++    * safe. */
++   pProperties->memoryTypeBits = UINT32_MAX;
++
+    return VK_SUCCESS;
+ }
+ 
+diff -ruN a/src/util/u_gralloc/meson.build b/src/util/u_gralloc/meson.build
+--- a/src/util/u_gralloc/meson.build
++++ b/src/util/u_gralloc/meson.build
+@@ -12,6 +12,7 @@
+   'u_gralloc.c',
+   'u_gralloc_internal.c',
+   'u_gralloc_fallback.c',
++  'u_gralloc_farm.c',
+   'u_gralloc_cros_api.c',
+   'u_gralloc_libdrm.c',
+   'u_gralloc_qcom.c',
+diff -ruN a/src/util/u_gralloc/u_gralloc.c b/src/util/u_gralloc/u_gralloc.c
+--- a/src/util/u_gralloc/u_gralloc.c
++++ b/src/util/u_gralloc/u_gralloc.c
+@@ -23,6 +23,7 @@
+    enum u_gralloc_type type;
+    struct u_gralloc *(*create)();
+ } u_grallocs[] = {
++   {.type = U_GRALLOC_TYPE_FARM, .create = u_gralloc_farm_create},
+    /* Prefer the CrOS API as it is significantly faster than IMapper4 */
+    {.type = U_GRALLOC_TYPE_CROS, .create = u_gralloc_cros_api_create},
+ #ifdef USE_IMAPPER4_METADATA_API
+diff -ruN a/src/util/u_gralloc/u_gralloc.h b/src/util/u_gralloc/u_gralloc.h
+--- a/src/util/u_gralloc/u_gralloc.h
++++ b/src/util/u_gralloc/u_gralloc.h
+@@ -54,6 +54,7 @@
+    U_GRALLOC_TYPE_LIBDRM,
+    U_GRALLOC_TYPE_QCOM,
+    U_GRALLOC_TYPE_FALLBACK,
++   U_GRALLOC_TYPE_FARM,
+    U_GRALLOC_TYPE_COUNT,
+ };
+ 
+diff -ruN a/src/util/u_gralloc/u_gralloc_internal.h b/src/util/u_gralloc/u_gralloc_internal.h
+--- a/src/util/u_gralloc/u_gralloc_internal.h
++++ b/src/util/u_gralloc/u_gralloc_internal.h
+@@ -38,6 +38,7 @@
+ extern struct u_gralloc *u_gralloc_qcom_create(void);
+ extern struct u_gralloc *u_gralloc_libdrm_create(void);
+ extern struct u_gralloc *u_gralloc_fallback_create(void);
++extern struct u_gralloc *u_gralloc_farm_create(void);
+ 
+ /* Helpers for legacy grallocs */
+ struct android_ycbcr;
+diff -ruN a/src/util/u_gralloc/farm_gralloc_handle.h b/src/util/u_gralloc/farm_gralloc_handle.h
+--- /dev/null
++++ b/src/util/u_gralloc/farm_gralloc_handle.h
+@@ -0,0 +1,66 @@
++/* Buffer handle shared by gralloc.venus.so and the Venus Vulkan driver.
++ *
++ * Every buffer is one dma-buf (or memfd for CPU-only formats). GPU buffers are
++ * allocated on the host GPU through Venus and exported, so any process can
++ * import them into its own Venus connection.
++ */
++#ifndef FARM_GRALLOC_HANDLE_H
++#define FARM_GRALLOC_HANDLE_H
++
++#include <cutils/native_handle.h>
++#include <stdint.h>
++
++#define FARM_GRALLOC_MAGIC 0x4641524d /* 'FARM' */
++
++enum farm_buffer_kind {
++   FARM_BUFFER_GPU = 0, /* host GPU memory, importable by Vulkan */
++   FARM_BUFFER_CPU = 1, /* plain shared memory, CPU access only */
++};
++
++struct farm_handle {
++   native_handle_t base;
++
++   /* fds */
++   int fd;
++
++   /* ints, identical in every process */
++   int magic;
++   int kind;
++   int width;
++   int height;
++   int hal_format;
++   int usage;
++   int pixel_stride; /* in pixels, what alloc() reports */
++   int drm_fourcc;
++   int num_planes;
++   int offsets[3];
++   int pitches[3]; /* bytes per row */
++   uint32_t modifier_lo;
++   uint32_t modifier_hi;
++   int size; /* bytes to map */
++
++   /* ints, private to the process holding this copy */
++   int map_pid;
++   int lock_count;
++   uint32_t map_lo;
++   uint32_t map_hi;
++   uint32_t shadow_lo; /* untiled copy handed out by lock() for tiled buffers */
++   uint32_t shadow_hi;
++   int lock_usage;
++};
++
++#define FARM_HANDLE_NUM_FDS 1
++#define FARM_HANDLE_NUM_INTS                                                 \
++   ((int)((sizeof(struct farm_handle) - sizeof(native_handle_t)) / sizeof(int)) - FARM_HANDLE_NUM_FDS)
++
++static inline const struct farm_handle *
++farm_handle_from(const native_handle_t *h)
++{
++   const struct farm_handle *fh = (const struct farm_handle *)h;
++   if (!h || h->numFds != FARM_HANDLE_NUM_FDS || h->numInts != FARM_HANDLE_NUM_INTS ||
++       fh->magic != FARM_GRALLOC_MAGIC)
++      return NULL;
++   return fh;
++}
++
++#endif
+diff -ruN a/src/util/u_gralloc/u_gralloc_farm.c b/src/util/u_gralloc/u_gralloc_farm.c
+--- /dev/null
++++ b/src/util/u_gralloc/u_gralloc_farm.c
+@@ -0,0 +1,60 @@
++/*
++ * farm: buffers from gralloc.venus.so carry their own layout in the handle.
++ * SPDX-License-Identifier: MIT
++ */
++#include <cutils/properties.h>
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "farm_gralloc_handle.h"
++#include "u_gralloc_internal.h"
++#include "util/log.h"
++
++static int
++farm_get_buffer_basic_info(struct u_gralloc *gralloc,
++                           struct u_gralloc_buffer_handle *hnd,
++                           struct u_gralloc_buffer_basic_info *out)
++{
++   const struct farm_handle *fh = farm_handle_from(hnd->handle);
++   if (!fh) {
++      mesa_loge("farm gralloc: not a farm buffer handle");
++      return -EINVAL;
++   }
++   if (fh->kind != FARM_BUFFER_GPU)
++      mesa_logw("farm gralloc: CPU-only buffer (format 0x%x) handed to the GPU", fh->hal_format);
++
++   out->drm_fourcc = fh->drm_fourcc;
++   out->modifier = ((uint64_t)fh->modifier_hi << 32) | fh->modifier_lo;
++   out->num_planes = fh->num_planes;
++   for (int i = 0; i < fh->num_planes && i < 3; i++) {
++      out->fds[i] = fh->fd;
++      out->offsets[i] = fh->offsets[i];
++      out->strides[i] = fh->pitches[i];
++   }
++   return 0;
++}
++
++static int
++farm_destroy(struct u_gralloc *gralloc)
++{
++   free(gralloc);
++   return 0;
++}
++
++struct u_gralloc *
++u_gralloc_farm_create(void)
++{
++   char value[PROPERTY_VALUE_MAX] = "";
++   property_get("ro.hardware.gralloc", value, "");
++   if (strcmp(value, "venus"))
++      return NULL;
++
++   struct u_gralloc *gr = calloc(1, sizeof(*gr));
++   if (!gr)
++      return NULL;
++   gr->ops.get_buffer_basic_info = farm_get_buffer_basic_info;
++   gr->ops.destroy = farm_destroy;
++   mesa_logi("Using farm (venus) gralloc");
++   return gr;
++}

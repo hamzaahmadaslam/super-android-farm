@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Never commit a farm's data or secrets
+config.yaml
+secrets/
+*.ovpn
+*.conf.secret
+auth.txt
+*.pem
+*.key
+
+# Built native artefacts (produced locally by the build scripts)
+native/**/out/
+native/**/work/
+*.so
+*.ko
+*.o
+
+# Apps and media are user content
+*.apk
+*.xapk
+*.apks
+*.apkm
+*.mp4
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

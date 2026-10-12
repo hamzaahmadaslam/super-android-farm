@@ -1,0 +1,16 @@
+# Builder for the host side of NVIDIA mode: the patched virglrenderer relay
+# (virgl_test_server + virgl_render_server), a normal Linux program.
+#
+# Reconstructed from the image the reference farm was built with: the Android builder plus
+# the development packages virglrenderer links against.
+#
+# The relay RUNS ON THE HOST, so it must be built against a C library that is not newer
+# than the host's. The default suits Ubuntu 26.04 hosts. On an older or different
+# distribution either pass a matching base (build.sh --base-image debian:13 ...) or build
+# on the host itself (build.sh relay --native).
+ARG BUILDER_IMAGE=superfarm/venus-builder
+FROM ${BUILDER_IMAGE}
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+    libepoxy-dev libgbm-dev libdrm-dev libvulkan-dev libegl-dev libgl-dev libx11-dev libva-dev python3-setuptools \
+    libwayland-dev wayland-protocols libxcb1-dev libx11-xcb-dev libxcb-randr0-dev libxcb-dri3-dev libxcb-present-dev \
+    libxcb-shm0-dev libxshmfence-dev libxrandr-dev libzstd-dev zlib1g-dev libexpat1-dev && rm -rf /var/lib/apt/lists/*

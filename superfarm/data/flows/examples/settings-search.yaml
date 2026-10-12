@@ -1,0 +1,24 @@
+# Search inside Android's own Settings app.
+#
+#   run the flow `examples/settings-search`, optionally with  query=bluetooth
+#
+# A small, complete flow to copy from: start an app fresh, wait for its first screen
+# by element (never by a fixed delay), tap, type a variable, and check the outcome.
+name: settings-search
+description: Open Settings, type a query into its search box and wait for results.
+package: com.android.settings
+variables:
+  query: battery
+timeouts:
+  step: 30
+  run: 180
+steps:
+  - launch: {fresh: true}
+  - wait_for: {id: search_action_bar}
+    label: wait for the Settings home screen
+  - tap: {id: search_action_bar}
+  - wait_for: {editable: true, focused: true}
+    label: wait for the search box to take focus
+  - type: {text: "{query}"}
+  - wait_for: {text_regex: "(?is).*{query}.*", editable: false}
+    label: wait for a result that mentions the query

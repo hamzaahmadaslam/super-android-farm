@@ -1,0 +1,71 @@
+# Super Farm daemon: the web panel, the API and everything that talks to Docker and ADB.
+#
+# Installed by `sudo sf host apply`, which fills in the placeholder fields. Not enabled
+# automatically:  sudo systemctl enable --now superfarm.service
+#
+# Why it runs as the desktop user and not as root: the earlier, root-run panels had no
+# display and no sound, so native device windows (scrcpy) and "listen to a device" did not
+# work. The daemon needs nothing root-only at run time: Docker through the docker group,
+# GPU and camera devices through the video/render groups.
+
+[Unit]
+Description=Super Farm daemon (Android container farm)
+Requires=docker.service
+Wants=network-online.target superfarm-host.service
+After=docker.service network-online.target superfarm-host.service
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+SupplementaryGroups=@SUPPLEMENTARY_GROUPS@
+Environment=SUPERFARM_HOME=@SUPERFARM_HOME@
+# The user's session: sound (PipeWire/PulseAudio sockets), Wayland and the session bus all
+# live under this folder. It exists while the user is logged in (or lingering is enabled).
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus
+# Optional overrides, one VAR=value per line: DISPLAY, WAYLAND_DISPLAY, XAUTHORITY.
+# A login script can refresh it:
+#   systemctl --user show-environment | grep -E '^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY)=' > session.env
+EnvironmentFile=-@SUPERFARM_HOME@/session.env
+ExecStart=@SF_BIN@ serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=1048576
+UMask=0027
+
+# Stop and restart only the daemon itself. The NVIDIA relay is started by the daemon and
+# every NVIDIA Android holds connections to it: with the default (kill the whole control
+# group) a daemon restart would take the graphics of all of them down.
+KillMode=process
+
+# ---- hardening that the daemon's work is compatible with
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+# Private /tmp, with the X11 socket folder let back in for scrcpy windows on X/XWayland.
+# Consequence to keep in mind: a path under /tmp handed to `docker run -v` would name the
+# *host's* /tmp, not this one. The farm keeps everything it mounts under SUPERFARM_HOME
+# and /run/superfarm for that reason.
+PrivateTmp=true
+BindReadOnlyPaths=-/tmp/.X11-unix
+
+# ---- deliberately NOT set
+# PrivateDevices / DevicePolicy / ProtectClock: each one switches on a device allow-list,
+#   which would hide /dev/dri/renderD*, /dev/nvidia*, /dev/video* and /dev/snd.
+# ProtectHome: the farm home normally lives in the user's home directory.
+# MemoryDenyWriteExecute: the NVIDIA driver inside the relay generates code at run time.
+# CapabilityBoundingSet: the process has no capabilities to begin with (plain user).
+
+[Install]
+WantedBy=multi-user.target

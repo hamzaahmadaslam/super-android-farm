@@ -1,0 +1,11 @@
+# Builder for the Android side of NVIDIA mode: the Mesa Venus Vulkan driver, cross-compiled
+# for Android 13 x86_64 with the NDK (mounted at /ndk, not baked into the image).
+#
+# Reconstructed from the image the reference farm was built with (`docker history`):
+# Ubuntu 26.04, meson 1.10, gcc 15 for the build-machine tools, NDK r27c clang 18 for the
+# target. Mesa 26 needs a recent meson; older base images may not have one.
+ARG BASE_IMAGE=ubuntu:26.04
+FROM ${BASE_IMAGE}
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+    meson ninja-build bison flex python3-mako python3-yaml python3-packaging pkg-config glslang-tools \
+    git ca-certificates curl xz-utils cmake build-essential file && rm -rf /var/lib/apt/lists/*

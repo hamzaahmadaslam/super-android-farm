@@ -1,0 +1,14 @@
+# Helper image for work on an Android's data volume while the Android is stopped:
+# backups, restores, clones, clearing caches.
+#
+# Built once (`sf image build tools`, or automatically at the first backup). The package
+# install happens here, at build time, on purpose: a helper that fetched its tools at every
+# run would need the internet for each backup and would break the day a mirror is down.
+#
+# GNU tar is required, not BusyBox tar: only it stores extended attributes, ACLs and sparse
+# files, and an Android /data restored without them does not boot into the same state.
+
+ARG BASE=alpine:3.22
+FROM ${BASE}
+RUN apk add --no-cache tar zstd pigz
+LABEL io.superfarm.role="tools"
