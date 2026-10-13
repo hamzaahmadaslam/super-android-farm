@@ -136,20 +136,27 @@ function startForm(instances, models, config, reload) {
 
   drawChips();
   drawCheck();
-  const formEl = h('form', { class: 'stack', onsubmit: (event) => { event.preventDefault(); return attempt(start); } },
-    h('div', { class: 'fields' },
-      h('div', { class: 'field wide', dataset: { path: 'goal' } }, h('label', { for: (goal.id = 'pilot-goal') }, 'Goal, in plain words'), goal,
-        h('div', { class: 'help' }, 'What should be reached in the app, as you would tell a person. One goal per session.')),
-      h('div', { class: 'field wide' }, h('span', { class: 'label-row' }, h('strong', null, 'Androids to teach on')),
-        h('div', { class: 'toolbar' }, selectorBox(chosen, () => running)), chips,
-        h('div', { class: 'help' }, `Each one asks the model once per step; ${config.ai.pilot.max_parallel} run at the same time, the rest queue.`)),
-      field('App (package)', pkg, 'The app the goal is in. Type it, or pick from what is installed.', { path: 'package' }),
-      field('Installed on the first selected Android', installed),
-      field('Model', model, null, { path: 'model' }),
-      field('Runs on each Android', runs, 'Several runs give training something to compare. Failed runs are discarded.', { path: 'runs' }),
-      field('Success check: what must be on screen at the end', checkKind,
-        'Choose something only the final screen has. Without a check of yours the Pilot can only accept an element the model itself names as evidence, which proves less; a run that nothing confirms ends "unverified".'),
-      field('Value for the check', checkValue, ['Sent as: ', checkString], { path: 'success' })),
+  // Grouped the way the operator thinks: the goal, where it runs, what runs it, and
+  // how a run is judged. Fields that belong together (the app and its picker, the check
+  // and its value) share a row, so that nothing sits alone in a half-empty grid.
+  const section = (title, ...body) => h('fieldset', null, h('legend', null, title), body);
+  const formEl = h('form', { class: 'stack pilot-form', onsubmit: (event) => { event.preventDefault(); return attempt(start); } },
+    h('div', { class: 'field', dataset: { path: 'goal' } }, h('label', { for: (goal.id = 'pilot-goal') }, 'Goal, in plain words'), goal,
+      h('div', { class: 'help' }, 'What should be reached in the app, as you would tell a person. One goal per session.')),
+    section('Androids to teach on',
+      h('div', { class: 'field' }, h('div', { class: 'toolbar' }, selectorBox(chosen, () => running)), chips,
+        h('div', { class: 'help' }, `Each one asks the model once per step; ${config.ai.pilot.max_parallel} run at the same time, the rest queue.`))),
+    section('App and model',
+      h('div', { class: 'fields two' },
+        field('App (package)', pkg, 'The app the goal is in. Type it, or pick from what is installed.', { path: 'package' }),
+        field('Installed on the first selected Android', installed, 'Picking one fills in the package.'),
+        field('Model', model, null, { path: 'model' }),
+        field('Runs on each Android', runs, 'Several runs give training something to compare. Failed runs are discarded.', { path: 'runs' }))),
+    section('Success check',
+      h('div', { class: 'fields two' },
+        field('What must be on screen at the end', checkKind),
+        field('Value for the check', checkValue, ['Sent as: ', checkString], { path: 'success' }),
+        h('p', { class: 'help wide' }, 'Choose something only the final screen has. Without a check of yours the Pilot can only accept an element the model itself names as evidence, which proves less; a run that nothing confirms ends "unverified".'))),
     h('details', null, h('summary', null, 'More: step limit, values to type, allowed apps, dataset name'),
       h('div', { class: 'fields' },
         field('Most actions per run', maxSteps, null, { path: 'max_steps' }),

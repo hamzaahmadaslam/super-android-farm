@@ -129,3 +129,41 @@ export function segmentedBar(parts, label) {
   }));
   return bar;
 }
+
+const DONUT = 132;
+const DONUT_R = 52;
+const DONUT_LEN = 2 * Math.PI * DONUT_R;
+
+// A ring cut into parts, with a number in the middle. parts: [{ kind, value, label }];
+// kinds are ok | info | warn | fail | idle. { el, set(parts, centre, sub) }
+export function donut() {
+  const segments = svg('g');
+  const picture = svg('svg', { viewBox: `0 0 ${DONUT} ${DONUT}`, 'aria-hidden': 'true' },
+    svg('circle', { class: 'donut-track', cx: DONUT / 2, cy: DONUT / 2, r: DONUT_R }), segments);
+  const number = h('span', { class: 'gauge-value' });
+  const under = h('span', { class: 'gauge-sub' });
+  const el = h('div', { class: 'donut', role: 'img' }, picture, h('div', { class: 'gauge-label' }, number, under));
+  return {
+    el,
+    set(parts, centre, sub) {
+      const shown = parts.filter((part) => part.value > 0);
+      const total = shown.reduce((sum, part) => sum + part.value, 0);
+      // A small gap between parts, none when one part is the whole ring.
+      const gap = shown.length > 1 ? 3 : 0;
+      let offset = 0;
+      segments.replaceChildren(...shown.map((part) => {
+        const length = (part.value / total) * DONUT_LEN;
+        const drawn = Math.max(1, length - gap);
+        const arc = svg('circle', {
+          class: `donut-part part-${part.kind}`, cx: DONUT / 2, cy: DONUT / 2, r: DONUT_R,
+          'stroke-dasharray': `${drawn.toFixed(1)} ${(DONUT_LEN - drawn).toFixed(1)}`, 'stroke-dashoffset': (-offset).toFixed(1),
+        });
+        offset += length;
+        return arc;
+      }));
+      number.textContent = String(centre);
+      under.textContent = sub;
+      el.setAttribute('aria-label', `${centre} ${sub}: ${shown.map((part) => `${part.value} ${part.label}`).join(', ') || 'nothing yet'}`);
+    },
+  };
+}

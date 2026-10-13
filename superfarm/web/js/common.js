@@ -140,7 +140,7 @@ export function skeleton(lines = 3) {
 }
 
 // ----------------------------------------------------------------- capacity
-const LIMIT = { ram: 'memory (RAM)', cpu: 'CPU', vram: 'video memory' };
+const LIMIT = { ram: 'memory (RAM)', cpu: 'CPU', vram: 'video memory', cards: 'GPU slots' };
 
 // One wording everywhere: "7 running of about 13 this machine can run".
 export function capacityText(capacity) {

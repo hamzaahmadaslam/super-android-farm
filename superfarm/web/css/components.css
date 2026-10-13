@@ -76,6 +76,9 @@ label { font-weight: 550; }
 .field-error .icon { width: 14px; height: 14px; margin-top: 2px; }
 .fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--s-3) var(--s-4); }
 .fields .wide { grid-column: 1 / -1; }
+/* Pairs that belong together stay side by side, instead of drifting into an auto-fill grid. */
+.fields.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.fields > .help { color: var(--muted); font-size: .86rem; line-height: 1.4; }
 fieldset { border: 1px solid var(--border); border-radius: var(--r-lg); padding: var(--s-3) var(--s-4) var(--s-4); margin: 0; min-width: 0; }
 legend { padding: 0 var(--s-2); font-weight: 620; font-size: .9rem; color: var(--muted); }
 .form-error { color: var(--fail); min-height: 1.2em; }
@@ -495,6 +498,7 @@ dialog.palette { width: min(640px, calc(100vw - 24px)); margin-top: min(14vh, 12
   .meter-row { grid-template-columns: minmax(0, 1fr) 84px; gap: var(--s-3); }
   .bulkbar { left: var(--s-2); right: var(--s-2); bottom: var(--s-2); width: auto; max-width: none; }
   .toolbar .field { flex-basis: 100%; }
+  .fields.two { grid-template-columns: minmax(0, 1fr); }
   .tabs-side { grid-template-columns: minmax(0, 1fr); gap: var(--s-3); }
   .tabs-side > .tabs { position: static; flex-direction: row; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: var(--s-2); }
   .dialog-head, .dialog-body, .dialog-foot { padding-inline: var(--s-4); }

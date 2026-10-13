@@ -27,6 +27,7 @@ import * as media from './pages/media.js';
 import * as network from './pages/network.js';
 import * as pilot from './pages/pilot.js';
 import * as settings from './pages/settings.js';
+import * as superControl from './pages/super.js';
 import * as system from './pages/system.js';
 import { getPref, setPref } from './prefs.js';
 import { go, startRouter } from './router.js';
@@ -37,13 +38,14 @@ const ROUTES = {
   apps: apps.render, network: network.render, automation: automation.render, media: media.render,
   backups: backups.render, system: system.render, settings: settings.render,
   approvals: approvals.render, access: access.render, assistant: assistant.render, pilot: pilot.render,
+  super: superControl.render,
 };
 // The Android detail page belongs to the "Androids" entry of the navigation.
 const NAV_OF = { android: 'androids' };
 const TITLES = {
   dashboard: 'Dashboard', androids: 'Androids', android: 'Android', control: 'Control', apps: 'Apps', network: 'Network',
   automation: 'Automation', media: 'Media', backups: 'Backups', system: 'System', settings: 'Settings',
-  approvals: 'Approvals', access: 'AI access', assistant: 'Assistant', pilot: 'AI Pilot',
+  approvals: 'Approvals', access: 'AI access', assistant: 'Assistant', pilot: 'AI Pilot', super: 'Super Control',
 };
 let currentRoute = '';
 let farmName = 'Super Farm';
