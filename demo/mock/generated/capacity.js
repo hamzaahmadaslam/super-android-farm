@@ -27,7 +27,8 @@ export default {
     "per_android_mb": 360,
     "total_mb": 16384,
     "measured": true,
-    "cards": 1
+    "cards": 1,
+    "reserve_mb": 1536
    }
   },
   "max_instances": 38,
@@ -177,7 +178,8 @@ export default {
     "per_android_mb": 360,
     "total_mb": 16384,
     "measured": true,
-    "cards": 1
+    "cards": 1,
+    "reserve_mb": 1536
    }
   },
   "max_instances": 38,
@@ -256,7 +258,7 @@ export default {
   "mode": "amd",
   "requested_mode": "amd",
   "mode_available": false,
-  "mode_reason": "gpu mode 'amd' needs an AMD GPU with a Mesa driver, and this machine has none. Valid choices on this machine: auto, software, igpu, dgpu, intel, nvidia.",
+  "mode_reason": "gpu mode 'amd' needs an AMD GPU with a Mesa driver, and this machine has none. Valid choices on this machine: auto, balanced, software, igpu, dgpu, intel, nvidia.",
   "workload": "video",
   "limits": {
    "ram": {
@@ -294,7 +296,7 @@ export default {
    "reference": "Android 13, 480x854, 2 CPUs / 1536 MB per Android, one live-video app"
   },
   "advice": [
-   "No Android can start with the farm's rendering mode (amd) right now: gpu mode 'amd' needs an AMD GPU with a Mesa driver, and this machine has none. Valid choices on this machine: auto, software, igpu, dgpu, intel, nvidia. The figures here are for amd mode.",
+   "No Android can start with the farm's rendering mode (amd) right now: gpu mode 'amd' needs an AMD GPU with a Mesa driver, and this machine has none. Valid choices on this machine: auto, balanced, software, igpu, dgpu, intel, nvidia. The figures here are for amd mode.",
    "Lowering android.fps helps UI-heavy screens; in video it saved only about 4 points of CPU (25 -> 15 fps), so do not expect much there.",
    "Keep performance.disable_animations on and stagger bulk starts (performance.start_concurrency): booting is the heaviest moment for the CPU.",
    "On hybrid CPUs try resources.cpu_pinning: performance|efficiency so background Androids stay off the fast cores. Not benchmarked."
@@ -327,7 +329,8 @@ export default {
     "per_android_mb": 360,
     "total_mb": 16384,
     "measured": true,
-    "cards": 1
+    "cards": 1,
+    "reserve_mb": 1536
    }
   },
   "max_instances": 38,

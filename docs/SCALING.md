@@ -108,7 +108,7 @@ Values are floors: a machine that already has more keeps its value. `systemd` li
 
 ADB ports are `network.adb_port_base + id` (5555 + id by default), so Android ids must keep the port in range, and the base must stay out of the kernel's outgoing port range, which the doctor checks in its "Ports" row. Ids go up to 9999. A shared VPN gateway holds at most 126 Androids ([Networking](NETWORKING.md)).
 
-With several GPUs, `gpu.assignment` spreads Androids over cards ([GPU](GPU.md#several-gpus)), and the video-memory limit sums over all NVIDIA cards. A second card, or putting part of the fleet on the integrated GPU, raises a VRAM limit. The relay is one process per card.
+With several GPUs, `gpu.assignment` spreads Androids over the cards of one mode, and `gpu.mode: balanced` shares the farm across every card and then the CPU ([GPU](GPU.md#several-gpus)). In `nvidia` mode the video-memory limit sums over all NVIDIA cards. In `balanced` mode video memory is no limit on the whole farm, because what the cards cannot hold goes to the integrated GPU and the CPU, and the estimate counts that mix. On a server, set `gpu.vram_reserve_mb: 0` ([Servers](GPU.md#servers)). The relay is one process per card.
 
 Disk: each Android needs 2 to 6 GB once apps are installed. The doctor warns below 5 GB free for the farm home and 20 GB for Docker's data. Backups go to `backup.dir` and add to it.
 
@@ -121,7 +121,7 @@ Run on one machine (32 threads, 32 GB, RTX 4080 SUPER plus the Intel iGPU, Andro
 - 17 idle NVIDIA Androids for the video-memory and zram figures. Sixteen Linux containers and then 13 full Androids shared one relay.
 - The panel in headless Chrome with 206 Androids rendered (generated data, not 206 real ones).
 
-Not run: more than two real Androids at once through Super Farm itself. Fleet behaviour (bulk operations, the busy rule, per-device failure isolation, automation runs on many devices) is covered by unit tests with fakes, not by a large live fleet. The figures for AMD are assumed, resolution and CPU pinning were not benchmarked, and Android versions other than 13 were not booted.
+Not run: more than three real Androids at once through Super Farm itself. Fleet behaviour (bulk operations, the busy rule, per-device failure isolation, automation runs on many devices) is covered by unit tests with fakes, not by a large live fleet. The figures for AMD are assumed, resolution and CPU pinning were not benchmarked, and Android versions other than 13 were not booted.
 
 ## Next
 

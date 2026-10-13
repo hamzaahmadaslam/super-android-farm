@@ -93,13 +93,20 @@ export default {
    "prefer": "dgpu",
    "render_node": "",
    "assignment": "round-robin",
+   "vram_reserve_mb": 1536,
+   "balance": {
+    "per_igpu": 0,
+    "per_dgpu": 0,
+    "overflow": "software"
+   },
    "clear_shader_cache_on_change": true,
    "nvidia": {
     "runtime_dir": "",
     "relay_dir": "",
     "socket_dir": "/run/superfarm/venus",
     "icd": "/usr/share/vulkan/icd.d/nvidia_icd.json",
-    "debug": false
+    "debug": false,
+    "isolate_cards": true
    }
   },
   "network": {

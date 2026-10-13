@@ -169,9 +169,10 @@ For one tunnel shared by many Androids: `sf gateway add eu --profile nl-ams.ovpn
 
 ```bash
 sf gpu ls
-sf gpu set 1-8 igpu                     # or software, dgpu, intel, amd, nvidia, auto, default
+sf gpu set 1-8 igpu                     # or software, dgpu, intel, amd, nvidia, auto, balanced, default
 sf restart 1-8                          # the mode applies at the next restart
 sf config set gpu.mode igpu             # the farm default
+sf config set gpu.mode balanced         # several GPUs: share across all of them, then the CPU
 ```
 
 See [docs/GPU.md](docs/GPU.md).

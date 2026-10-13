@@ -313,6 +313,12 @@ class InstanceManager:
         self._locks: dict[int, threading.Lock] = {}
         self._guard = threading.Lock()
         self._creating = threading.Lock()          # ids are handed out to one create() at a time
+        # A bulk start runs several starts at once. Each one picks its card from how full
+        # the cards are, so the picking is done one at a time and a pick counts from the
+        # moment it is made, not from the moment its container is up: three Androids
+        # started together must not all see the same empty card.
+        self._placing = threading.Lock()
+        self._placed: dict[int, str] = {}          # Android id -> render node, while its start is under way
         self._activity: dict[int, str] = {}
         self._booted: set[int] = set()
         self._booting = _Booting()
@@ -870,9 +876,11 @@ class InstanceManager:
             except ImageError as e:
                 raise StartError(f"Android {id}: {e}") from None
 
-            containers = self._farm_containers()
-            r = r.model_copy(update={"image": image, "cpuset": self._choose_cpuset(spec, r, containers)})
-            gpu, notes = self._choose_gpu(r, _gpu_counts(containers, id))
+            with self._placing:
+                containers = self._farm_containers()
+                r = r.model_copy(update={"image": image, "cpuset": self._choose_cpuset(spec, r, containers)})
+                gpu, notes = self._choose_gpu(r, _gpu_counts(containers, id, self._placed))
+                self._placed[id] = gpu.node
             warnings += notes
             try:
                 net_args = [str(a) for a in self.backends.sidecar_run_args(r, self.config, self.paths, self.store, self.docker)]
@@ -918,6 +926,8 @@ class InstanceManager:
             _step(task, f"Android {id}: waiting for boot")
             adb = self._wait_boot(r, task)
         finally:
+            with self._placing:
+                self._placed.pop(id, None)
             if reserved:
                 self._booting.release(id)
 
@@ -1358,14 +1368,30 @@ class InstanceManager:
         return self.bulk("start", ",".join(str(i) for i in sorted(ids)))
 
 
-def _gpu_counts(containers: list[dict], skip_id: int) -> dict[str, int]:
-    """Running Androids per render node, for the GPU module's assignment policy."""
-    counts: dict[str, int] = {}
+class GpuLoad(dict):
+    """Running Androids per render node, and the card the Android being started used last
+    (`previous`): the GPU module keeps an Android on its card while that card has room."""
+    previous: str = ""
+
+
+def _gpu_counts(containers: list[dict], skip_id: int, placed: dict[int, str] | None = None) -> GpuLoad:
+    """Androids per render node, for the GPU module's assignment policy: the running ones,
+    and those whose start is under way and has picked its card (`placed`) but whose
+    container is not up yet."""
+    counts = GpuLoad()
+    seen: set[str] = set()
     for c in containers:
         labels = c["labels"]
         node = labels.get(LABEL_GPU_NODE, "")
-        if (node and c["state"] == "running" and labels.get(LABEL_ROLE) == "android"
-                and labels.get(LABEL_INSTANCE) != str(skip_id)):
+        if not node or labels.get(LABEL_ROLE) != "android":
+            continue
+        if labels.get(LABEL_INSTANCE) == str(skip_id):
+            counts.previous = node
+        elif c["state"] == "running":
+            counts[node] = counts.get(node, 0) + 1
+            seen.add(labels.get(LABEL_INSTANCE, ""))
+    for other, node in (placed or {}).items():
+        if node and other != skip_id and str(other) not in seen:
             counts[node] = counts.get(node, 0) + 1
     return counts
 

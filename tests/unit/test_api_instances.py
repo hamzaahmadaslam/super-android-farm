@@ -84,7 +84,7 @@ def test_gpus_on_a_machine_without_a_gpu_still_offers_cpu_rendering(a, monkeypat
     monkeypatch.setattr(venus, "relay_status", lambda config, nodes=None: [])
     body = a.client.get("/api/system/gpus").json()
     assert body["gpus"] == []
-    assert [o["value"] for o in body["options"] if o["available"]] == ["auto", "software"]
+    assert [o["value"] for o in body["options"] if o["available"]] == ["auto", "balanced", "software"]
 
 
 def test_device_profiles(a):

@@ -91,11 +91,20 @@ One group per entry of `android.images`; `<name>` is the entry's name. Entries p
 
 | Key | Type | Default | Allowed | Description |
 | --- | --- | --- | --- | --- |
-| `gpu.mode` | choice | `"auto"` | `auto`, `software`, `igpu`, `dgpu`, `intel`, `amd`, `nvidia` | How Androids draw (default for the farm; each Android can override it). auto: best available. software: CPU only. igpu: the integrated GPU. dgpu: a discrete card of any vendor. intel / amd: that vendor's GPU through Mesa. nvidia: Vulkan relayed to the card (needs the Venus runtime). |
+| `gpu.mode` | choice | `"auto"` | `auto`, `balanced`, `software`, `igpu`, `dgpu`, `intel`, `amd`, `nvidia` | How Androids draw (default for the farm; each Android can override it). auto: best available. balanced: shared across every usable GPU, emptiest first, then the CPU. software: CPU only. igpu: the integrated GPU. dgpu: a discrete card of any vendor. intel / amd: that vendor's GPU through Mesa. nvidia: Vulkan relayed to the card (needs the Venus runtime). |
 | `gpu.prefer` | choice | `"dgpu"` | `dgpu`, `igpu` | Which kind `auto` tries first when the machine has both. igpu keeps the discrete card free for other work and draws the least power. |
-| `gpu.render_node` | text | `""` |  | Force one /dev/dri/renderD* node for intel/amd/nvidia. Empty = detect by driver. |
+| `gpu.render_node` | text | `""` |  | Force one card for intel/amd/nvidia: a /dev/dri/renderD* node, or the card's PCI address (0000:01:00.0), which stays the same when the node numbers change between boots. Empty = detect by driver. |
 | `gpu.assignment` | choice | `"round-robin"` | `first`, `round-robin`, `least-instances` | With several usable GPUs of the chosen kind: which one a new Android gets. |
+| `gpu.vram_reserve_mb` | whole number | `1536` | at least 0 | Video memory of each discrete card that is left to everything else when Androids are counted. A desktop session holds about the default; set 0 on a headless server. |
 | `gpu.clear_shader_cache_on_change` | true / false | `true` |  | Delete apps' compiled-shader caches when an Android's renderer changes. Stale caches crash apps at start. |
+
+### gpu.balance
+
+| Key | Type | Default | Allowed | Description |
+| --- | --- | --- | --- | --- |
+| `gpu.balance.per_igpu` | whole number | `0` | at least 0 | balanced mode: the most Androids one integrated GPU takes. 0 = no limit of its own. |
+| `gpu.balance.per_dgpu` | whole number | `0` | at least 0 | balanced mode: the most Androids one discrete card takes. 0 = worked out from the card's video memory where that is known, else no limit. |
+| `gpu.balance.overflow` | choice | `"software"` | `software`, `refuse` | balanced mode, once every card is full: software draws further Androids on the CPU, refuse fails their start instead. |
 
 ### gpu.nvidia
 
@@ -106,6 +115,7 @@ One group per entry of `android.images`; `<name>` is the entry's name. Entries p
 | `gpu.nvidia.socket_dir` | text | `"/run/superfarm/venus"` |  | Where relay sockets live. One socket per NVIDIA card. |
 | `gpu.nvidia.icd` | text | `"/usr/share/vulkan/icd.d/nvidia_icd.json"` |  | Vulkan ICD manifest of the NVIDIA driver on the host. It names the driver library the relay loads: set in config.yaml or with `sf config set`, not through the API. |
 | `gpu.nvidia.debug` | true / false | `false` |  | Verbose driver logging inside Android (mesa.log.level=debug). Costs CPU; leave off. |
+| `gpu.nvidia.isolate_cards` | true / false | `true` |  | On a machine with several NVIDIA cards: start each card's relay so that it offers that card only (through the Mesa device-select layer on the host). Without it every relay offers all cards and Androids draw on the first. No effect with one card. |
 
 ## network
 

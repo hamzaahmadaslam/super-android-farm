@@ -79,7 +79,9 @@ Problem: on Ubuntu 26.04, Docker could not create a network or publish a port.
 
 Cause: `/proc/sys/kernel/modprobe` was empty, so nothing was loaded on demand. `veth`, `xt_tcpudp` and `xt_nat` had to be loaded by name.
 
-What Super Farm does: it never relies on auto-loading. Every module it needs is listed in `superfarm/host/modules.py`, loaded explicitly by `sf host apply` and again at every boot, and checked by `sf doctor`. The kill switch uses only the firewall matches Docker itself depends on (interface, address, port, connection state, masquerade), because anything else may not be loadable on such a host.
+What Super Farm does: it never relies on auto-loading. Every module it needs is listed in `superfarm/host/modules.py`, loaded explicitly by `sf host apply` and again at every boot, and checked by `sf doctor`.  The kill switch uses only the firewall matches Docker itself depends on (interface, address, port, connection state, masquerade), because anything else may not be loadable on such a host.
+
+Seen again later on the same machine: `sf doctor` reported auto-loading on, three Androids were started, and the next `sf doctor` reported it off, with `/proc/sys/kernel/modprobe` empty. What empties it was not traced; an Android is a privileged container and can write that file. Until the next boot the kernel loads nothing on demand. `sudo sysctl -w kernel.modprobe=/sbin/modprobe` puts it back, and with `sf host apply` done the farm does not depend on it.
 
 ### Secure Boot rejects a module you built yourself
 

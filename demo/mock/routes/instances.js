@@ -9,7 +9,7 @@ import { MAX_ANDROIDS, newSpec } from '../seed.js';
 import { clone, db, now, round } from '../store.js';
 
 const BOOTS = new Set(['start', 'restart', 'recreate']);
-const GPU_MODES = ['auto', 'software', 'igpu', 'dgpu', 'intel', 'amd', 'nvidia'];
+const GPU_MODES = ['auto', 'balanced', 'software', 'igpu', 'dgpu', 'intel', 'amd', 'nvidia'];
 const NET_MODES = ['direct', 'vpn', 'gateway', 'proxy', 'none'];
 
 // The checks worth making on a hand-typed setting; the real daemon validates the whole

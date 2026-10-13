@@ -20,7 +20,7 @@ from .util.files import read_yaml, write_yaml
 
 # software = CPU only. igpu / dgpu pick by kind (integrated / discrete) whatever the vendor;
 # intel / amd / nvidia pick by vendor. A specific card is pinned with render_node.
-GpuMode = Literal["auto", "software", "igpu", "dgpu", "intel", "amd", "nvidia"]
+GpuMode = Literal["auto", "balanced", "software", "igpu", "dgpu", "intel", "amd", "nvidia"]
 NetMode = Literal["direct", "vpn", "gateway", "proxy", "none"]
 VpnProvider = Literal["openvpn", "wireguard"]
 
@@ -121,13 +121,22 @@ class NvidiaConfig(_Model):
     socket_dir: str = Field("/run/superfarm/venus", description="Where relay sockets live. One socket per NVIDIA card.")
     icd: str = Field("/usr/share/vulkan/icd.d/nvidia_icd.json", description="Vulkan ICD manifest of the NVIDIA driver on the host. It names the driver library the relay loads: set in config.yaml or with `sf config set`, not through the API.")
     debug: bool = Field(False, description="Verbose driver logging inside Android (mesa.log.level=debug). Costs CPU; leave off.")
+    isolate_cards: bool = Field(True, description="On a machine with several NVIDIA cards: start each card's relay so that it offers that card only (through the Mesa device-select layer on the host). Without it every relay offers all cards and Androids draw on the first. No effect with one card.")
+
+
+class GpuBalanceConfig(_Model):
+    per_igpu: int = Field(0, ge=0, description="balanced mode: the most Androids one integrated GPU takes. 0 = no limit of its own.")
+    per_dgpu: int = Field(0, ge=0, description="balanced mode: the most Androids one discrete card takes. 0 = worked out from the card's video memory where that is known, else no limit.")
+    overflow: Literal["software", "refuse"] = Field("software", description="balanced mode, once every card is full: software draws further Androids on the CPU, refuse fails their start instead.")
 
 
 class GpuConfig(_Model):
-    mode: GpuMode = Field("auto", description="How Androids draw (default for the farm; each Android can override it). auto: best available. software: CPU only. igpu: the integrated GPU. dgpu: a discrete card of any vendor. intel / amd: that vendor's GPU through Mesa. nvidia: Vulkan relayed to the card (needs the Venus runtime).")
+    mode: GpuMode = Field("auto", description="How Androids draw (default for the farm; each Android can override it). auto: best available. balanced: shared across every usable GPU, emptiest first, then the CPU. software: CPU only. igpu: the integrated GPU. dgpu: a discrete card of any vendor. intel / amd: that vendor's GPU through Mesa. nvidia: Vulkan relayed to the card (needs the Venus runtime).")
     prefer: Literal["dgpu", "igpu"] = Field("dgpu", description="Which kind `auto` tries first when the machine has both. igpu keeps the discrete card free for other work and draws the least power.")
-    render_node: str = Field("", description="Force one /dev/dri/renderD* node for intel/amd/nvidia. Empty = detect by driver.")
+    render_node: str = Field("", description="Force one card for intel/amd/nvidia: a /dev/dri/renderD* node, or the card's PCI address (0000:01:00.0), which stays the same when the node numbers change between boots. Empty = detect by driver.")
     assignment: Literal["first", "round-robin", "least-instances"] = Field("round-robin", description="With several usable GPUs of the chosen kind: which one a new Android gets.")
+    vram_reserve_mb: int = Field(1536, ge=0, description="Video memory of each discrete card that is left to everything else when Androids are counted. A desktop session holds about the default; set 0 on a headless server.")
+    balance: GpuBalanceConfig = Field(default_factory=GpuBalanceConfig)
     clear_shader_cache_on_change: bool = Field(True, description="Delete apps' compiled-shader caches when an Android's renderer changes. Stale caches crash apps at start.")
     nvidia: NvidiaConfig = Field(default_factory=NvidiaConfig)
 

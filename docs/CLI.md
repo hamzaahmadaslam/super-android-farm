@@ -104,7 +104,7 @@ Add one or more Androids. Anything not given follows the farm's settings (sf con
 
 ```
 sf create [-n COUNT] [--name NAME] [--android VERSION]
-          [--gpu {auto,software,igpu,dgpu,intel,amd,nvidia}]
+          [--gpu {auto,balanced,software,igpu,dgpu,intel,amd,nvidia}]
           [--net {direct,vpn,gateway,proxy,none}] [--vpn PROFILE] [--gateway NAME] [--cpus CPUS]
           [--memory MIB] [--width WIDTH] [--height HEIGHT] [--dpi DPI] [--fps FPS] [--tag TAG]
           [--data-volume VOLUME] [--image IMAGE]
@@ -115,7 +115,7 @@ sf create [-n COUNT] [--name NAME] [--android VERSION]
 | `-n, --count COUNT` | `1` | how many (default: 1) |
 | `--name NAME` |  | display name (numbered when several are created) |
 | `--android VERSION` |  | Android version, e.g. 13 (default: android.default_version) |
-| `--gpu {auto,software,igpu,dgpu,intel,amd,nvidia}` |  | rendering: CPU only (software), integrated or discrete GPU, a vendor, or auto |
+| `--gpu {auto,balanced,software,igpu,dgpu,intel,amd,nvidia}` |  | rendering: CPU only (software), integrated or discrete GPU, a vendor, or auto |
 | `--net {direct,vpn,gateway,proxy,none}` |  | network mode |
 | `--vpn PROFILE` |  | pin this VPN profile (implies --net vpn) |
 | `--gateway NAME` |  | shared VPN gateway to use (implies --net gateway) |
@@ -345,13 +345,13 @@ sf gpu ls
 Choose how Androids draw (applied at their next restart).
 
 ```
-sf gpu set [--node DEVICE] selector {auto,software,igpu,dgpu,intel,amd,nvidia,default}
+sf gpu set [--node DEVICE] selector {auto,balanced,software,igpu,dgpu,intel,amd,nvidia,default}
 ```
 
 | Argument | Description |
 | --- | --- |
 | `selector` | which Androids |
-| `{auto,software,igpu,dgpu,intel,amd,nvidia,default}` | `default` follows the farm's gpu.mode again |
+| `{auto,balanced,software,igpu,dgpu,intel,amd,nvidia,default}` | `default` follows the farm's gpu.mode again |
 
 | Option | Default | Description |
 | --- | --- | --- |

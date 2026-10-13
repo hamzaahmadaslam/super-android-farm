@@ -46,6 +46,7 @@ route('GET', '/api/system/gpus', () => {
     gpus: GPUS,
     options: [
       option('auto', `Automatic (now: ${card.name} (discrete, relay))`),
+      option('balanced', 'Balanced: shared across 2 GPUs, then the CPU'),
       option('software', 'CPU only (software rendering)'),
       option('igpu', `Integrated GPU: ${intel.name}`),
       option('dgpu', `Discrete GPU: ${card.name}`),

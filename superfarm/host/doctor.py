@@ -630,8 +630,27 @@ def check_gpus(c: Ctx) -> Check:
              f"{', '.join(m for m in (g.kind, *g.usable_modes) if m) if g.usable_modes else 'unusable: ' + g.note}"
              for g in gpus]
     status = OK if any(g.usable_modes for g in gpus) else WARN
+    several = [g for g in gpus if g.vendor == "nvidia" and g.usable_modes]
+    if len(several) > 1:
+        # One relay per card, each limited to its card by a Vulkan layer of the host.
+        parts.append(f"{len(several)} NVIDIA cards: each relay is limited to its own card through Mesa's device-select "
+                     "layer, " + ("which is installed" if venus.device_select_layer(c.root) else
+                                  "which is NOT installed: every relay would offer all cards and Androids would draw "
+                                  "on the first (install the distribution's Mesa Vulkan layers package)")
+                     + "; several NVIDIA cards have not been verified")
     return Check("gpu.detected", "GPUs", status, "; ".join(parts),
                  "" if status == OK else "No card can be used by Android; software rendering will be used.")
+
+
+def _groups() -> set[str]:
+    """Names of the groups this process is in."""
+    mine = set()
+    for gid in os.getgroups():
+        try:
+            mine.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            continue
+    return mine
 
 
 def check_gpu_access(c: Ctx) -> Check:
@@ -639,18 +658,31 @@ def check_gpu_access(c: Ctx) -> Check:
     gpus = [g for g in c.gpus() if g.usable_modes]
     if not gpus:
         return Check("gpu.access", title, SKIP, "no usable GPU")
-    mine = set()
-    for gid in os.getgroups():
-        try:
-            mine.add(grp.getgrgid(gid).gr_name)
-        except KeyError:
-            continue
+    mine = _groups()
     denied = [g for g in gpus if not os.access(g.node, os.R_OK | os.W_OK)]
     user = c.env.get("USER") or "$USER"
     if not denied:
-        return Check("gpu.access", title, OK, "this user can open " + ", ".join(g.node for g in gpus)
-                     + (" (through groups " + ", ".join(sorted(mine & {"video", "render"})) + ")"
-                        if mine & {"video", "render"} else " (through the login session's device ACL)"))
+        in_group = mine & {"video", "render"}
+        opened = "this user can open " + ", ".join(g.node for g in gpus)
+        if in_group:
+            return Check("gpu.access", title, OK, opened + " (through groups " + ", ".join(sorted(in_group)) + ")")
+        # The ACL belongs to whoever sits at the machine: it is not there over SSH, and it
+        # goes away when that person logs out. Intel and AMD cards do not care (Docker
+        # passes the node itself), the NVIDIA relay does: it opens the card as this user.
+        nvidia = [g for g in gpus if g.vendor == "nvidia"]
+        if nvidia:
+            owners = set()
+            for g in nvidia:
+                try:
+                    owners.add(grp.getgrgid(os.stat(g.node).st_gid).gr_name)
+                except (OSError, KeyError):
+                    owners.add("render")
+            return Check("gpu.access", title, WARN,
+                         opened + ", but only through the login session's device ACL: over SSH, on a server without "
+                         "a desktop, or once you log out while the user service keeps running, the NVIDIA relay "
+                         "loses the card",
+                         f"sudo usermod -aG {','.join(sorted(owners))} {user}    # then log out and in again")
+        return Check("gpu.access", title, OK, opened + " (through the login session's device ACL)")
     owners = set()
     for g in denied:
         try:
@@ -919,6 +951,12 @@ def check_session(c: Ctx) -> Check:
                     "; the user manager has no display variables, so a user service started now has no display")
     if display and sound:
         return Check("session.desktop", title, OK, "display and sound server reachable" + note)
+    # A server: nothing to fix. No desktop is installed, so there is no session to run in.
+    installed = any(any((c.root / folder).glob("*.desktop")) for folder in ("usr/share/xsessions", "usr/share/wayland-sessions"))
+    if not display and not installed:
+        return Check("session.desktop", title, SKIP,
+                     "no desktop is installed (a server): native device windows and listening on the host's speakers "
+                     "are not available; the web panel, live views and everything else work")
     lacking = [n for n, ok in (("display", display), ("sound server", sound)) if not ok]
     return Check("session.desktop", title, WARN,
                  f"no {' or '.join(lacking)} for this process: native device windows / listening will not work "

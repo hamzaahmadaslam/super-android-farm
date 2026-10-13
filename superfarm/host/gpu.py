@@ -14,11 +14,14 @@ What an Android can be told to use (gpu.mode for the farm, gpu_mode per Android)
 
     auto       the best that works now; gpu.prefer says whether a discrete card or the
                integrated GPU is tried first
+    balanced   shared across every usable card, the emptiest first, and across the CPU
+               once the cards are full; for machines with several GPUs
     software   the CPU
     igpu       the integrated GPU, whoever made it
     dgpu       a discrete card, whoever made it (NVIDIA through the relay, AMD/Intel through Mesa)
     intel / amd / nvidia   a GPU of that vendor
-    gpu_node   pins one exact card; it must be a card the mode allows
+    gpu_node   pins one exact card (a render node or a PCI address); it must be a card
+               the mode allows
 
 Detection reads sysfs only (/sys/class/drm/renderD*/device), so it needs no tools and no
 privileges, and `sysfs` can be pointed at a fake tree in tests. choose() is deterministic:
@@ -57,12 +60,29 @@ AMD_CPU_VENDOR = "0x1022"
 # to a virtual machine, not processor graphics (whose carve-out of system RAM is smaller).
 PASSTHROUGH_VRAM_MB = 3072
 
+# Video memory one Android holds on a card, for counting how many a card takes. The
+# measurement behind the figure is described in superfarm.host.capacity.
+VRAM_PER_ANDROID_MB = 360
+
 BOOT_SOFTWARE = "androidboot.redroid_gpu_mode=guest"
 BOOT_HOST = "androidboot.redroid_gpu_mode=host"
 BOOT_VENUS = "androidboot.redroid_gpu_mode=venus"
 
 _RENDER = re.compile(r"^renderD(\d+)$")
-_PCI = re.compile(r"^[0-9a-f]{4}:([0-9a-f]{2}):[0-9a-f]{2}\.[0-9a-f]$")
+# The domain is four hex digits on a PC and longer on some servers (Intel VMD uses five).
+_PCI = re.compile(r"^[0-9a-f]{4,8}:([0-9a-f]{2}):[0-9a-f]{2}\.[0-9a-f]$")
+
+
+def pci_key(address: str) -> tuple[int, str] | None:
+    """A PCI address in a form that compares equal however its domain is padded:
+    sysfs writes 0000:01:00.0 and nvidia-smi 00000000:01:00.0 for the same card."""
+    domain, sep, rest = address.strip().lower().partition(":")
+    if not sep or not _PCI.match(f"{domain[-8:].rjust(4, '0')}:{rest}"):
+        return None
+    try:
+        return int(domain, 16), rest
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -228,15 +248,16 @@ def nvidia_vram(gpus: list[GpuInfo], runner: Callable[..., proc.Result] | None =
         return gpus
     if not r.ok:
         return gpus
-    by_pci: dict[str, int] = {}
+    by_pci: dict[tuple[int, str], int] = {}
     for line in r.stdout.splitlines():
         bus, _, mem = (p.strip() for p in line.partition(","))
-        if mem.isdigit():
+        key = pci_key(bus)
+        if mem.isdigit() and key:
             # nvidia-smi prints an 8-digit PCI domain (00000000:01:00.0); sysfs uses 4.
-            by_pci[bus.lower()[-12:]] = int(mem)
+            by_pci[key] = int(mem)
     for g in gpus:
         if g.vendor == "nvidia" and not g.vram_mb:
-            g.vram_mb = by_pci.get(g.pci.lower()) or None
+            g.vram_mb = by_pci.get(pci_key(g.pci) or (-1, "")) or None
     return gpus
 
 
@@ -302,6 +323,90 @@ def _nvidia_blocker(runtime: dict) -> str:
     return ""
 
 
+# ------------------------------------------------------------------ balanced
+
+def card_slots(g: GpuInfo, config: Config) -> int | None:
+    """The most Androids `balanced` puts on this card; None = no limit of its own.
+
+    A discrete card is limited by its own memory, where that is known. An integrated GPU
+    is not: the "video memory" it reports is a carve-out of system RAM that it grows past,
+    so only the operator's figure limits it."""
+    cap = config.gpu.balance.per_igpu if g.integrated else config.gpu.balance.per_dgpu
+    if cap:
+        return cap
+    if g.discrete and g.vram_mb:
+        return max(0, (g.vram_mb - config.gpu.vram_reserve_mb) // VRAM_PER_ANDROID_MB)
+    return None
+
+
+def balanced_order(cards: list[GpuInfo], config: Config, counts: dict[str, int] | None = None,
+                   previous: str = "") -> tuple[list[GpuInfo], list[GpuInfo]]:
+    """(cards with room, in the order to try them; cards that are full).
+
+    The emptiest card comes first, measured as running Androids over what the card takes,
+    so a large card gets proportionally more than a small one. A card without a limit of
+    its own is measured against the largest limit among the others (against nothing when
+    no card has one: then it is a plain count). Ties go to gpu.prefer, then node order.
+    `previous`, the card this Android used last, stays first while it has room: moving an
+    Android to another card rebuilds its container."""
+    counts = counts or {}
+    slots = {g.node: card_slots(g, config) for g in cards}
+    nominal = max((n for n in slots.values() if n), default=1)
+    free = [g for g in cards if slots[g.node] is None or counts.get(g.node, 0) < slots[g.node]]
+    full = [g for g in cards if g not in free]
+    free.sort(key=lambda g: (g.node != previous, counts.get(g.node, 0) / (slots[g.node] or nominal),
+                             g.kind != config.gpu.prefer, cards.index(g)))
+    return free, full
+
+
+def _room(g: GpuInfo, config: Config, counts: dict[str, int]) -> str:
+    limit = card_slots(g, config)
+    return f"{counts.get(g.node, 0)} of {limit}" if limit is not None else f"{counts.get(g.node, 0)}, no limit"
+
+
+def _balanced(r: Resolved, config: Config, paths: Paths, gpus: list[GpuInfo], runtime: dict,
+              counts: dict[str, int] | None, start_relay: Callable[[GpuInfo], str]) -> GpuChoice:
+    counts = counts or {}
+    skipped: list[str] = []
+    cards = [g for g in gpus if g.usable_modes]
+    if any(g.vendor == "nvidia" for g in cards):
+        blocker = _nvidia_blocker(runtime)
+        if blocker:
+            skipped.append(NVIDIA_SKIPPED + blocker)
+            cards = [g for g in cards if g.vendor != "nvidia"]
+    free, full = balanced_order(cards, config, counts, getattr(counts, "previous", ""))
+    for g in free:
+        if g.vendor == "nvidia":
+            why = start_relay(g)
+            if why:
+                skipped.append(NVIDIA_SKIPPED + why)
+                continue
+        how = "through the Venus relay" if g.vendor == "nvidia" else f"via Mesa ({g.driver})"
+        reason = "; ".join([f"balanced: {g.name} {how}, the emptiest card ({_room(g, config, counts)} in use)", *skipped])
+        return _nvidia(g, config, paths, reason) if g.vendor == "nvidia" else _mesa(g, reason)
+    if not full:
+        return _software("; ".join(["balanced: no usable GPU, drawing on the CPU", *skipped]))
+    taken = ", ".join(f"{display_name(g)} {_room(g, config, counts)}" for g in full)
+    if config.gpu.balance.overflow == "refuse":
+        raise ValueError(f"gpu mode 'balanced': every card is full ({taken}) and gpu.balance.overflow is 'refuse'. "
+                         "Stop some Androids, raise gpu.balance.per_dgpu / per_igpu, or set gpu.balance.overflow "
+                         "to software")
+    return _software("; ".join([f"balanced: every card is full ({taken}), drawing on the CPU", *skipped]))
+
+
+def resolve_pin(pin: str, gpus: list[GpuInfo]) -> str:
+    """The render node a pinned card has now. A pin is a node, a PCI address or a
+    /dev/dri/by-path link; the last two keep naming the same card when the kernel hands
+    out the node numbers in another order at the next boot. Unknown pins come back as
+    they are, for the caller's error message."""
+    m = re.match(r"^/dev/dri/by-path/pci-([0-9a-f:.]+)-render$", pin)
+    wanted = pci_key(m.group(1) if m else pin)
+    for g in gpus:
+        if pin == g.node or (wanted and pci_key(g.pci) == wanted):
+            return g.node
+    return pin
+
+
 def _fits(g: GpuInfo, mode: str) -> bool:
     """Whether a usable card may serve a requested mode."""
     if not g.usable_modes:
@@ -348,7 +453,7 @@ def available_modes(gpus: list[GpuInfo], runtime: dict, prefer: str = "dgpu") ->
     """Modes that would work right now, in the order the panel lists them."""
     def first(c: list[GpuInfo]) -> GpuInfo:
         return c[0]
-    return ["auto", "software"] + [m for m in (*KIND_MODES, *VENDOR_MODES)
+    return ["auto", "balanced", "software"] + [m for m in (*KIND_MODES, *VENDOR_MODES)
                                    if _serve(m, gpus, prefer, runtime, first, lambda g: "")[0] is not None]
 
 
@@ -382,16 +487,21 @@ def choose(r: Resolved, config: Config, paths: Paths, *, counts: dict[str, int] 
     mode = r.gpu_mode
     if mode == "software":
         return _software("software rendering was requested")
-    gpus = detect_gpus() if gpus is None else gpus
+    if gpus is None:
+        gpus = detect_gpus()
+        if mode == "balanced":
+            gpus = nvidia_vram(gpus)         # how many a card takes comes from its memory
     runtime = venus.runtime_status(config, paths) if runtime is None else runtime
     valid = f"Valid choices on this machine: {', '.join(available_modes(gpus, runtime, config.gpu.prefer))}."
-    forced = r.gpu_node
+    forced = resolve_pin(r.gpu_node, gpus) if r.gpu_node else ""
     pool = gpus
     if forced:
+        if mode == "balanced":
+            mode = "auto"                    # a pinned card leaves nothing to share
         pool = [g for g in gpus if g.node == forced]
         if not pool:
             known = ", ".join(g.node for g in gpus) or "none"
-            raise ValueError(f"render node {forced} does not exist on this machine (found: {known}); "
+            raise ValueError(f"the pinned card {forced} does not exist on this machine (found: {known}); "
                              "fix gpu.render_node / the instance's gpu_node")
 
     def start_relay(g: GpuInfo) -> str:
@@ -404,6 +514,8 @@ def choose(r: Resolved, config: Config, paths: Paths, *, counts: dict[str, int] 
             return str(e)
         return ""
 
+    if mode == "balanced":
+        return _balanced(r, config, paths, pool, runtime, counts, start_relay)
     card, tier, skipped = _serve(mode, pool, config.gpu.prefer, runtime,
                                  lambda cands: _pick(cands, r, config, counts), start_relay)
     if card is None:
@@ -468,6 +580,7 @@ def options(config: Config, paths: Paths, *, gpus: list[GpuInfo] | None = None,
     out = [
         {"value": "auto", "label": f"Automatic (now: {card_label(auto) if auto else SOFTWARE_LABEL})",
          "available": True, "reason": "; ".join(auto_skipped), "node": ""},
+        {"value": "balanced", "label": _balanced_label(gpus, runtime), "available": True, "reason": "", "node": ""},
         {"value": "software", "label": SOFTWARE_LABEL, "available": True, "reason": "", "node": ""},
         entry("igpu", "Integrated GPU", gpus),
         entry("dgpu", "Discrete GPU", gpus),
@@ -482,12 +595,21 @@ def options(config: Config, paths: Paths, *, gpus: list[GpuInfo] | None = None,
     return out
 
 
+def _balanced_label(gpus: list[GpuInfo], runtime: dict) -> str:
+    blocked = _nvidia_blocker(runtime)
+    cards = [g for g in gpus if g.usable_modes and not (g.vendor == "nvidia" and blocked)]
+    if not cards:
+        return "Balanced (no usable GPU now: the CPU)"
+    return f"Balanced: shared across {len(cards)} GPU{'s' if len(cards) != 1 else ''}, then the CPU"
+
+
 def summary(config: Config, paths: Paths, gpus: list[GpuInfo] | None = None) -> dict:
     """What the panel's host page shows: cards, modes available now, and the auto pick."""
     gpus = nvidia_vram(detect_gpus()) if gpus is None else gpus
     runtime = venus.runtime_status(config, paths)
-    # `auto` always works and is not a statement about the hardware, so it is left out here.
-    available = [m for m in available_modes(gpus, runtime, config.gpu.prefer) if m != "auto"]
+    # `auto` and `balanced` always work and are no statement about the hardware, so they
+    # are left out here.
+    available = [m for m in available_modes(gpus, runtime, config.gpu.prefer) if m not in ("auto", "balanced")]
     return {"gpus": [g.__dict__ for g in gpus], "available_modes": available,
             "nvidia_runtime": runtime, "nvidia_blocker": _nvidia_blocker(runtime) if any(
                 g.vendor == "nvidia" for g in gpus) else ""}

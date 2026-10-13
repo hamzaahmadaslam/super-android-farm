@@ -13,6 +13,10 @@ The first version. [docs/VERIFICATION.md](docs/VERIFICATION.md) says which of th
 - Android instances as pairs of Docker containers: a network sidecar and the Android, with one data volume each
 - A different Android version per instance (images configured for Android 9 to 15)
 - Rendering per Android: CPU, integrated GPU, discrete GPU, by vendor, or one pinned card; NVIDIA through a Venus relay built from `native/venus/`
+- `balanced` rendering for machines with several GPUs: the farm is shared across every usable card, the emptiest first and in proportion to each card's video memory, and what the cards cannot hold draws on the CPU; the capacity estimate counts that mix
+- A card pinned by PCI address, which names the same card when the render node numbers change between boots
+- On a machine with several NVIDIA cards, each relay limited to its own card
+- `gpu.vram_reserve_mb` for headless servers, and server-aware host checks
 - Device presets and a stable identity per Android
 - An advisory capacity estimate, with optional enforcement
 - `sf doctor`: 46 read-only host checks, each with its fix
@@ -46,6 +50,7 @@ The first version. [docs/VERIFICATION.md](docs/VERIFICATION.md) says which of th
 - The `sf` command line, with shell completion
 - An HTTP API with token and session authentication, an audit log and WebSocket events
 - A web panel served by the daemon, with no build step and no external requests
+- Super Control, a panel page that shows the whole farm at once: figures, a card per Android with a live still, an interactive live feed with broadcast input, host resources, capacity, tasks, the fleet by state, the network, a timeline, alerts and a command console
 - The daemon as a systemd user service
 
 ### Operations

@@ -360,9 +360,15 @@ def test_no_gpu_warns_and_nvidia_checks_are_skipped(tmp_path):
     assert {r[k].status for k in ("gpu.access", "nvidia.driver", "nvidia.icd", "nvidia.runtime", "nvidia.relay")} == {"skip"}
 
 
-def test_nvidia_card_states(tmp_path):
+def test_nvidia_card_states(tmp_path, monkeypatch):
     root, paths = healthy(tmp_path)
     add_gpu(root, 129, "nvidia", "0x10de", "0000:01:00.0")
+    # Reaching the card through the session's ACL alone does not last on a server or
+    # after logging out, and the relay opens the card as this user: said, with the fix.
+    monkeypatch.setattr(doctor, "_groups", lambda: set())
+    acl = run(root, paths)["gpu.access"]
+    assert acl.status == "warn" and "SSH" in acl.detail and "usermod -aG" in acl.fix
+    monkeypatch.setattr(doctor, "_groups", lambda: {"render"})
     r = run(root, paths)
     assert "nvidia" in r["gpu.detected"].detail and r["gpu.access"].status == "ok"
     assert r["nvidia.driver"].status == "fail"                  # no /proc/driver/nvidia/version
@@ -448,6 +454,11 @@ def test_selinux_enforcing_warns_about_sidecar_mounts(tmp_path):
 
 def test_session_and_host_setup(tmp_path):
     root, paths = healthy(tmp_path)
+    # No desktop installed: a server, where there is nothing to fix.
+    server = run(root, paths, env={"USER": "farmer", "XDG_RUNTIME_DIR": "/run/user/1000"})["session.desktop"]
+    assert server.status == "skip" and "server" in server.detail and not server.fix
+    # A desktop is installed but this process is outside its session.
+    w(root, "usr/share/wayland-sessions/desktop.desktop", "")
     headless = run(root, paths, env={"USER": "farmer", "XDG_RUNTIME_DIR": "/run/user/1000"})["session.desktop"]
     assert headless.status == "warn" and "display" in headless.detail
     w(root, "run/user/1000/pipewire-0", "")

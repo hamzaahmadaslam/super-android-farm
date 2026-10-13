@@ -685,8 +685,8 @@ VARIABLES = {"type": "object", "additionalProperties": {"type": "string", "maxLe
              "description": "Values for the variables the flow or program declares (see list_flows / list_programs). "
                             "Used for this run only and never written to disk."}
 _SPEC_PROPERTIES = {
-    "gpu_mode": {"type": "string", "enum": ["auto", "software", "igpu", "dgpu", "intel", "amd", "nvidia"],
-                 "description": "Rendering: auto (best available), software (CPU only), igpu, dgpu, or a vendor."},
+    "gpu_mode": {"type": "string", "enum": ["auto", "balanced", "software", "igpu", "dgpu", "intel", "amd", "nvidia"],
+                 "description": "Rendering: auto (best available), balanced (shared across every GPU, then the CPU), software (CPU only), igpu, dgpu, or a vendor."},
     "cpus": {"type": "number", "minimum": 0.25, "maximum": 256, "description": "CPU cores this Android may use."},
     "memory_mb": {"type": "integer", "minimum": 512, "maximum": 1048576, "description": "RAM limit in MiB."},
     "network_mode": {"type": "string", "enum": ["direct", "vpn", "gateway", "proxy", "none"],

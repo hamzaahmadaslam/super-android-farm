@@ -813,6 +813,29 @@ def test_bulk_runs_every_android_and_one_failure_does_not_stop_the_rest(farm):
         farm.mgr.bulk("explode", "all")
 
 
+def test_androids_started_together_do_not_all_pick_the_same_empty_card(farm):
+    """Found on a real machine: a bulk start runs its starts at once, each counted the cards
+    before any of the others had a running container, and three Androids landed on a card
+    that was to take one. A pick counts from the moment it is made."""
+    from core_fakes import FakeGpu
+    farm.mgr.config.performance.start_concurrency = 4
+    farm.mgr.create(count=4)
+    card = "/dev/dri/renderD128"
+    seen = []
+
+    def choose(r, config, paths, *, counts=None):
+        seen.append(dict(counts or {}).get(card, 0))
+        # The card takes two; the rest draw on the CPU.
+        return FakeGpu(mode="intel", node=card) if seen[-1] < 2 else FakeGpu()
+    farm.mgr.backends.gpu_choose = choose
+    task = farm.tasks.wait(farm.mgr.bulk("start", "all"), timeout=20)
+    assert task.state == "done" and all(r["ok"] for r in task.results.values())
+    assert sorted(seen) == [0, 1, 2, 2]                    # each start saw the picks made before it
+    modes = sorted(farm.mgr.status(i)["gpu"]["mode"] for i in (1, 2, 3, 4))
+    assert modes == ["intel", "intel", "software", "software"]
+    assert farm.mgr._placed == {}                          # nothing is left reserved once the starts are over
+
+
 def test_autostart_picks_configured_and_flagged_androids(farm):
     farm.mgr.create(count=3, template={"tags": ["always"]})
     farm.mgr.update(1, {"tags": []})

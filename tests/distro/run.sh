@@ -65,14 +65,17 @@ for key in "${targets[@]}"; do
   docker rm -f "$name" >/dev/null 2>&1 || true
   # In the background and waited for: bash runs a trap only between commands, so with the
   # container in the foreground an interrupt would be ignored until the container ended.
-  timeout "$TIMEOUT" docker run --name "$name" --memory 2g --memory-swap 2g --cpus 4 \
+  # -k: the docker client hands the first signal on to the container, whose shell ignores
+  # it while a package manager runs, so without a kill afterwards the limit never ends a
+  # stuck download (seen with a slow mirror: the container ran on long past the limit).
+  timeout -k 30 "$TIMEOUT" docker run --name "$name" --memory 2g --memory-swap 2g --cpus 4 \
     -v "$REPO:/src:ro" -e SF_INSTALL_NO_SYSTEM=1 "${IMAGE[$key]}" \
     bash /src/tests/distro/inside.sh > "$log" 2>&1 &
   wait $!
   code=$?
   docker rm -f "$name" >/dev/null 2>&1 || true
   current=""
-  [ "$code" = 0 ] || { echo "   container exited with code $code (124 = timed out after ${TIMEOUT}s)"; overall=1; }
+  [ "$code" = 0 ] || { echo "   container exited with code $code (124 or 137 = timed out after ${TIMEOUT}s)"; overall=1; }
   grep -q $'^SFRESULT\t[^\t]*\tfail' "$log" && overall=1
 done
 

@@ -83,7 +83,7 @@ class InstanceSpec(BaseModel):
     fps: int | None = Field(None, ge=5, le=120)
 
     gpu_mode: GpuMode | None = None
-    gpu_node: str | None = Field(None, pattern=r"^(/dev/dri/renderD\d+)?$")
+    gpu_node: str | None = Field(None, pattern=r"^(/dev/dri/renderD\d+|/dev/dri/by-path/pci-[0-9a-f:.]+-render|[0-9a-f]{4,8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])?$")
     resources: ResourceOverrides = Field(default_factory=ResourceOverrides)
     network: NetworkOverrides = Field(default_factory=NetworkOverrides)
     device: DeviceIdentity = Field(default_factory=DeviceIdentity)

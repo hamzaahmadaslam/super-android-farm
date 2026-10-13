@@ -198,7 +198,7 @@ def machine(tmp_path, cards, paths, *, runtime=READY, config=None):
 
 def test_machine_intel_igpu_only(tmp_path, paths):
     available, got = machine(tmp_path, {128: INTEL_IGPU}, paths)
-    assert available == ["auto", "software", "igpu", "intel"]
+    assert available == ["auto", "balanced", "software", "igpu", "intel"]
     assert got == {"auto": ("intel", "igpu", D128), "software": ("software", "cpu", ""),
                    "igpu": ("intel", "igpu", D128), "intel": ("intel", "igpu", D128),
                    "dgpu": None, "amd": None, "nvidia": None}
@@ -206,19 +206,19 @@ def test_machine_intel_igpu_only(tmp_path, paths):
 
 def test_machine_intel_igpu_plus_nvidia(tmp_path, paths):
     available, got = machine(tmp_path, {128: INTEL_IGPU, 129: NVIDIA}, paths)
-    assert available == ["auto", "software", "igpu", "dgpu", "intel", "nvidia"]
+    assert available == ["auto", "balanced", "software", "igpu", "dgpu", "intel", "nvidia"]
     assert got == {"auto": ("nvidia", "dgpu", D129), "software": ("software", "cpu", ""),
                    "igpu": ("intel", "igpu", D128), "intel": ("intel", "igpu", D128),
                    "dgpu": ("nvidia", "dgpu", D129), "nvidia": ("nvidia", "dgpu", D129), "amd": None}
     # Without the relay the card is there but cannot be used; auto falls back to the integrated GPU.
     available, got = machine(tmp_path / "b", {128: INTEL_IGPU, 129: NVIDIA}, paths, runtime=NOT_BUILT)
-    assert available == ["auto", "software", "igpu", "intel"]
+    assert available == ["auto", "balanced", "software", "igpu", "intel"]
     assert got["auto"] == ("intel", "igpu", D128) and got["dgpu"] is None and got["nvidia"] is None
 
 
 def test_machine_amd_igpu_plus_nvidia(tmp_path, paths):
     available, got = machine(tmp_path, {128: AMD_APU, 129: NVIDIA}, paths)
-    assert available == ["auto", "software", "igpu", "dgpu", "amd", "nvidia"]
+    assert available == ["auto", "balanced", "software", "igpu", "dgpu", "amd", "nvidia"]
     assert got == {"auto": ("nvidia", "dgpu", D129), "software": ("software", "cpu", ""),
                    "igpu": ("amd", "igpu", D128), "amd": ("amd", "igpu", D128),
                    "dgpu": ("nvidia", "dgpu", D129), "nvidia": ("nvidia", "dgpu", D129), "intel": None}
@@ -226,7 +226,7 @@ def test_machine_amd_igpu_plus_nvidia(tmp_path, paths):
 
 def test_machine_amd_igpu_plus_amd_dgpu(tmp_path, paths):
     available, got = machine(tmp_path, {128: AMD_APU, 129: AMD_CARD}, paths)
-    assert available == ["auto", "software", "igpu", "dgpu", "amd"]
+    assert available == ["auto", "balanced", "software", "igpu", "dgpu", "amd"]
     assert got["auto"] == ("amd", "dgpu", D129) and got["dgpu"] == ("amd", "dgpu", D129)
     assert got["igpu"] == ("amd", "igpu", D128)
     assert got["intel"] is None and got["nvidia"] is None
@@ -239,7 +239,7 @@ def test_machine_amd_igpu_plus_amd_dgpu(tmp_path, paths):
 
 def test_machine_intel_igpu_plus_intel_arc(tmp_path, paths):
     available, got = machine(tmp_path, {128: INTEL_IGPU, 129: INTEL_ARC}, paths)
-    assert available == ["auto", "software", "igpu", "dgpu", "intel"]
+    assert available == ["auto", "balanced", "software", "igpu", "dgpu", "intel"]
     assert got["auto"] == ("intel", "dgpu", D129) and got["dgpu"] == ("intel", "dgpu", D129)
     assert got["igpu"] == ("intel", "igpu", D128)
     assert got["amd"] is None and got["nvidia"] is None
@@ -249,16 +249,16 @@ def test_machine_intel_igpu_plus_intel_arc(tmp_path, paths):
 
 def test_machine_two_nvidia_cards(tmp_path, paths):
     available, got = machine(tmp_path, {128: NVIDIA, 129: NVIDIA_2}, paths)
-    assert available == ["auto", "software", "dgpu", "nvidia"]
+    assert available == ["auto", "balanced", "software", "dgpu", "nvidia"]
     assert got["auto"][:2] == got["dgpu"][:2] == got["nvidia"][:2] == ("nvidia", "dgpu")
     assert got["igpu"] is None and got["intel"] is None and got["amd"] is None
     available, got = machine(tmp_path / "b", {128: NVIDIA, 129: NVIDIA_2}, paths, runtime=NOT_BUILT)
-    assert available == ["auto", "software"] and got["auto"] == ("software", "cpu", "")
+    assert available == ["auto", "balanced", "software"] and got["auto"] == ("software", "cpu", "")
 
 
 def test_machine_without_a_gpu(tmp_path, paths):
     available, got = machine(tmp_path, {}, paths)
-    assert available == ["auto", "software"]
+    assert available == ["auto", "balanced", "software"]
     assert got == {"auto": ("software", "cpu", ""), "software": ("software", "cpu", ""),
                    "igpu": None, "dgpu": None, "intel": None, "amd": None, "nvidia": None}
 
@@ -350,11 +350,11 @@ def test_requested_modes_that_cannot_work_raise_with_the_reason(tmp_path, paths)
 
 def test_errors_name_the_choices_this_machine_does_have(tmp_path, paths):
     gs = detect(tmp_path, {128: INTEL_IGPU, 129: NVIDIA})
-    with pytest.raises(ValueError, match=r"Valid choices on this machine: auto, software, igpu, dgpu, intel, nvidia\.$"):
+    with pytest.raises(ValueError, match=r"Valid choices on this machine: auto, balanced, software, igpu, dgpu, intel, nvidia\.$"):
         choose(resolved(gpu_mode="amd"), paths, gs)
-    with pytest.raises(ValueError, match=r"Valid choices on this machine: auto, software, igpu, intel\.$"):
+    with pytest.raises(ValueError, match=r"Valid choices on this machine: auto, balanced, software, igpu, intel\.$"):
         choose(resolved(gpu_mode="nvidia"), paths, gs, runtime=NOT_BUILT)
-    with pytest.raises(ValueError, match=r"Valid choices on this machine: auto, software\.$"):
+    with pytest.raises(ValueError, match=r"Valid choices on this machine: auto, balanced, software\.$"):
         choose(resolved(gpu_mode="igpu"), paths, [])
 
 
@@ -476,7 +476,7 @@ def test_options_shape_and_order(tmp_path, paths):
     rows = gpu.options(Config(), paths, gpus=detect(tmp_path, {128: INTEL_IGPU, 129: NVIDIA}), runtime=READY)
     assert all(set(o) == {"value", "label", "available", "reason", "node"} for o in rows)
     assert [(o["value"], o["node"]) for o in rows] == [
-        ("auto", ""), ("software", ""), ("igpu", ""), ("dgpu", ""), ("intel", ""), ("amd", ""), ("nvidia", ""),
+        ("auto", ""), ("balanced", ""), ("software", ""), ("igpu", ""), ("dgpu", ""), ("intel", ""), ("amd", ""), ("nvidia", ""),
         ("intel", D128), ("nvidia", D129)]
     o = by_key(rows)
     assert all(o[k]["available"] for k in o if k != ("amd", ""))
@@ -499,7 +499,7 @@ def test_options_say_why_the_nvidia_card_cannot_be_chosen_yet(tmp_path, paths):
 
 def test_options_on_other_machines(tmp_path, paths):
     none = by_key(gpu.options(Config(), paths, gpus=[], runtime=READY))
-    assert [k for k, o in none.items() if o["available"]] == [("auto", ""), ("software", "")]
+    assert [k for k, o in none.items() if o["available"]] == [("auto", ""), ("balanced", ""), ("software", "")]
     assert none[("auto", "")]["label"] == "Automatic (now: CPU only (software rendering))"
     assert "needs an integrated GPU" in none[("igpu", "")]["reason"]
 

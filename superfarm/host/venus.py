@@ -182,7 +182,63 @@ def relay_status(config: Config, *, nodes: list[str] | None = None, proc_root: P
 
 # ------------------------------------------------------------------ starting
 
-def relay_command(config: Config, paths: Paths, node: str) -> tuple[list[str], dict[str, str]]:
+def nvidia_cards(sysfs: Path | str = "/sys") -> dict[str, str]:
+    """Render node name -> PCI address of every card bound to NVIDIA's own driver. Reads
+    sysfs only; a machine without one returns {}."""
+    out: dict[str, str] = {}
+    drm = Path(sysfs) / "class" / "drm"
+    try:
+        entries = sorted(e for e in os.listdir(drm) if e.startswith("renderD"))
+    except OSError:
+        return out
+    for entry in entries:
+        device = drm / entry / "device"
+        try:
+            driver = os.path.basename(os.readlink(device / "driver"))
+            address = os.path.basename(os.path.realpath(device))
+        except OSError:
+            continue
+        if driver == "nvidia" and address.count(":") == 2:
+            out[entry] = address.lower()
+    return out
+
+
+def card_filter(config: Config, node: str, sysfs: Path | str = "/sys") -> dict[str, str]:
+    """Environment that limits a relay to one card, on a machine with several NVIDIA cards.
+
+    The relay's `--rendernode` does not choose the Vulkan device: Venus offers Android
+    every device the host's Vulkan loader lists, and Android takes the first. With two
+    cards every relay would therefore put its Androids on the same one. Mesa's device-select
+    layer, which wraps any Vulkan driver, hides all devices but the one named by PCI address.
+    Not exercised on a machine with two NVIDIA cards; gpu.nvidia.isolate_cards switches it
+    off. With one card nothing is set, so that machine runs exactly as it did."""
+    if not config.gpu.nvidia.isolate_cards:
+        return {}
+    cards = nvidia_cards(sysfs)
+    address = cards.get(node_name(node))
+    if len(cards) < 2 or not address:
+        return {}
+    return {"DRI_PRIME": "pci-" + address.replace(":", "_").replace(".", "_") + "!",
+            "MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE": "1"}
+
+
+# Where distributions install the manifest of Mesa's device-select layer.
+DEVICE_SELECT_MANIFESTS = ("usr/share/vulkan/implicit_layer.d", "etc/vulkan/implicit_layer.d",
+                           "usr/local/share/vulkan/implicit_layer.d")
+
+
+def device_select_layer(root: Path | str = "/") -> bool:
+    """Whether Mesa's device-select Vulkan layer is installed (card_filter needs it)."""
+    for folder in DEVICE_SELECT_MANIFESTS:
+        try:
+            if any("device_select" in name for name in os.listdir(Path(root) / folder)):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def relay_command(config: Config, paths: Paths, node: str, *, sysfs: Path | str = "/sys") -> tuple[list[str], dict[str, str]]:
     """argv and extra environment of the relay for one card."""
     rl = relay_dir(config, paths)
     sock = socket_dir(config, node) / SOCKET_NAME
@@ -200,6 +256,7 @@ def relay_command(config: Config, paths: Paths, node: str) -> tuple[list[str], d
     }
     if lib:
         env["LD_LIBRARY_PATH"] = os.pathsep.join(p for p in (str(lib), os.environ.get("LD_LIBRARY_PATH", "")) if p)
+    env.update(card_filter(config, node, sysfs))
     return argv, env
 
 

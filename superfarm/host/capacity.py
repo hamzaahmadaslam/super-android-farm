@@ -14,6 +14,7 @@ from pathlib import Path
 from ..config import Config
 from ..paths import Paths, get_paths
 from . import gpu as gpu_mod
+from . import venus
 from .gpu import GpuInfo
 
 # ----------------------------------------------------------------- measured: memory
@@ -53,9 +54,12 @@ FPS_VIDEO_SAVING_PERCENT = 4
 # 16 GB card; the desktop alone held about 1.5 GB of that card before any Android started.
 # (7.6 - 1.5) / 17 = about 360 MB per Android at 480x854. One measurement, one app, one
 # resolution: treat it as a planning figure and watch `nvidia-smi` on your own fleet.
-VRAM_PER_ANDROID_MB = 360
-VRAM_RESERVE_MB = 1536          # what a desktop session (compositor, browsers) holds on the card
+VRAM_PER_ANDROID_MB = gpu_mod.VRAM_PER_ANDROID_MB       # 360
+VRAM_RESERVE_MB = 1536          # what a desktop session (compositor, browsers) holds on the card;
+                                # the default of gpu.vram_reserve_mb, which a headless server sets to 0
 VRAM_MEASURED = True
+# How far the balanced estimate counts before it calls the answer "more than this".
+MIX_CEILING = 4096
 
 # ----------------------------------------------------------------- measured once: zram
 # Compressed swap in RAM (16 GB, zstd, swap priority 100, vm.swappiness=150) on the 32 GB
@@ -142,6 +146,69 @@ def _default_mode(config: Config, paths: Paths, gpus: list[GpuInfo], runtime: di
             "mode_reason": blocked}
 
 
+def _balanced_mix(config: Config, gpus: list[GpuInfo], runtime: dict, *, workload: str, threads: int,
+                  usable_ram_mb: int, trimmed: bool) -> dict:
+    """What gpu.mode `balanced` does with a growing fleet: one Android after another is
+    placed the way a start would place it (gpu.balanced_order), each with the CPU and RAM
+    of the renderer it lands on, until the CPU and the RAM have both run out. Nothing is
+    started. Returns the two ceilings, the averages at the lower one, and who got what."""
+    blocked = gpu_mod._nvidia_blocker(runtime)                                   # noqa: SLF001 - same package
+    cards = [g for g in gpus if g.usable_modes and not (g.vendor == "nvidia" and blocked)]
+    cpu_budget = threads * 100 * CPU_TARGET_UTILISATION
+    cpu_cap = int(config.resources.cpus * 100)
+    counts: dict[str, int] = {}
+    placed: list[tuple[str, str, int, int]] = []           # mode, node, cpu percent, RAM MB
+    cpu = ram = 0
+    by_cpu: int | None = None
+    by_ram: int | None = None if usable_ram_mb else 0
+    by_cards: int | None = None
+    for n in range(MIX_CEILING):
+        free, full = gpu_mod.balanced_order(cards, config, counts)
+        if free:
+            mode, node = free[0].vendor, free[0].node
+        elif full and config.gpu.balance.overflow == "refuse":
+            by_cards = n
+            break
+        else:
+            mode, node = "software", ""
+        one_cpu = min(CPU_PERCENT.get(mode, CPU_PERCENT["software"])[workload], cpu_cap)
+        one_ram = per_android_ram_mb(mode, trimmed=trimmed, limit_mb=config.resources.memory_mb)
+        cpu += one_cpu
+        ram += one_ram
+        if by_cpu is None and cpu > cpu_budget:
+            by_cpu = n
+        if by_ram is None and ram > usable_ram_mb:
+            by_ram = n
+        if by_cpu is not None and by_ram is not None:
+            break
+        placed.append((mode, node, one_cpu, one_ram))
+        if node:
+            counts[node] = counts.get(node, 0) + 1
+    # A ceiling the count never reached (the cards refused first, or the count gave up):
+    # what the fleet placed so far costs on average says where it would have been.
+    if by_cpu is None:
+        by_cpu = int(cpu_budget * len(placed) // max(1, sum(x[2] for x in placed))) if placed else 0
+    if by_ram is None:
+        by_ram = int(usable_ram_mb * len(placed) // max(1, sum(x[3] for x in placed))) if placed else 0
+    fits = placed[:min(by_cpu, by_ram, *([by_cards] if by_cards is not None else []))]
+    by_node = {g.node: g for g in cards}
+    shares: dict[tuple[str, str], dict] = {}
+    for mode, node, _cpu, _ram in fits:
+        g = by_node.get(node)
+        entry = shares.setdefault((mode, node), {
+            "mode": mode, "node": node, "label": gpu_mod.card_label(g) if g else gpu_mod.SOFTWARE_LABEL,
+            "slots": gpu_mod.card_slots(g, config) if g else None, "count": 0})
+        entry["count"] += 1
+    first = placed[0] if placed else ("software", "", min(CPU_PERCENT["software"][workload], cpu_cap),
+                                      per_android_ram_mb("software", trimmed=trimmed, limit_mb=config.resources.memory_mb))
+    return {
+        "by_cpu": by_cpu, "by_ram": by_ram, "by_cards": by_cards, "shares": list(shares.values()),
+        # Averages over the fleet that fits; of the first Android when none does.
+        "cpu_percent": round(sum(x[2] for x in fits) / len(fits)) if fits else first[2],
+        "ram_mb": round(sum(x[3] for x in fits) / len(fits)) if fits else first[3],
+    }
+
+
 def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", root: Path | str = "/",
              cpu_threads: int | None = None, running: int | None = None, paths: Paths | None = None,
              runtime: dict | None = None) -> dict:
@@ -164,7 +231,9 @@ def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", ro
     total = mem.get("MemTotal", 0)
     available = mem.get("MemAvailable", 0)
     threads = cpu_threads or os.cpu_count() or 1
-    drawing = _default_mode(config, paths or get_paths(), gpus, runtime)
+    paths = paths or get_paths()
+    runtime = venus.runtime_status(config, paths) if runtime is None else runtime
+    drawing = _default_mode(config, paths, gpus, runtime)
     mode = drawing["mode"]
     trimmed = config.performance.trim_packages
     per_ram = per_android_ram_mb(mode, trimmed=trimmed, limit_mb=config.resources.memory_mb)
@@ -172,12 +241,19 @@ def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", ro
     zram = zram_active(root)
 
     by_ram = max(0, (total - reserve) // per_ram) if total else 0
-    more_now = max(0, (available - config.performance.memory_guard_mb) // per_ram) if available else 0
 
     cpu_pct = CPU_PERCENT.get(mode, CPU_PERCENT["software"])[workload]
     # An Android cannot use more than its --cpus cap; software video sat exactly on it.
     cpu_pct = min(cpu_pct, int(config.resources.cpus * 100))
     by_cpu = int(threads * 100 * CPU_TARGET_UTILISATION // cpu_pct)
+
+    # balanced has no single renderer: the fleet is a mix, counted Android by Android.
+    mix = None
+    if config.gpu.mode == "balanced" and drawing["mode_available"]:
+        mix = _balanced_mix(config, gpus, runtime, workload=workload, threads=threads,
+                            usable_ram_mb=max(0, total - reserve), trimmed=trimmed)
+        mode, per_ram, cpu_pct, by_ram, by_cpu = "balanced", mix["ram_mb"], mix["cpu_percent"], mix["by_ram"], mix["by_cpu"]
+    more_now = max(0, (available - config.performance.memory_guard_mb) // per_ram) if available else 0
 
     ram: dict = {"max": int(by_ram), "more_now": int(more_now), "per_android_mb": per_ram,
                  "total_mb": total, "available_mb": available, "host_reserve_mb": reserve}
@@ -206,13 +282,16 @@ def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", ro
         cards = [g for g in gpus if "nvidia" in g.usable_modes]
         known = [g for g in cards if g.vram_mb]
         if known:
-            by_vram = sum(max(0, (g.vram_mb - VRAM_RESERVE_MB) // VRAM_PER_ANDROID_MB) for g in known)
+            by_vram = sum(max(0, (g.vram_mb - config.gpu.vram_reserve_mb) // VRAM_PER_ANDROID_MB) for g in known)
             limits["vram"] = {"max": int(by_vram), "per_android_mb": VRAM_PER_ANDROID_MB,
                               "total_mb": sum(g.vram_mb for g in known), "measured": VRAM_MEASURED,
-                              "cards": len(cards)}
+                              "cards": len(cards), "reserve_mb": config.gpu.vram_reserve_mb}
+    if mix and mix["by_cards"] is not None:
+        # Only with gpu.balance.overflow: refuse; otherwise the CPU takes what the cards cannot.
+        limits["cards"] = {"max": int(mix["by_cards"]), "cards": len(mix["shares"])}
 
     candidates = {k: v["max"] for k, v in limits.items()}
-    binding = min(candidates, key=lambda k: (candidates[k], ("ram", "cpu", "vram").index(k)))
+    binding = min(candidates, key=lambda k: (candidates[k], ("ram", "cpu", "vram", "cards").index(k)))
     result = {
         "mode": mode, "requested_mode": config.gpu.mode, "mode_available": drawing["mode_available"],
         "mode_reason": drawing["mode_reason"], "workload": workload, "limits": limits, "max_instances": candidates[binding],
@@ -225,6 +304,8 @@ def estimate(config: Config, gpus: list[GpuInfo], *, workload: str = "video", ro
             "reference": "Android 13, 480x854, 2 CPUs / 1536 MB per Android, one live-video app",
         },
     }
+    if mix:
+        result["mix"] = mix["shares"]
     result["advice"] = _advice(config, gpus, result)
     return result
 
@@ -237,12 +318,26 @@ def _advice(config: Config, gpus: list[GpuInfo], est: dict) -> list[str]:
     if not est["mode_available"]:
         out.append(f"No Android can start with the farm's rendering mode ({est['requested_mode']}) right now: "
                    f"{reason} The figures here are for {mode} mode.")
+    elif est.get("mix") is not None and gpu_mod.NVIDIA_SKIPPED in reason:
+        why = reason.split(gpu_mod.NVIDIA_SKIPPED, 1)[1]
+        out.append(f"The NVIDIA card is not part of the mix yet ({why}). Once it is, it takes its share, and each "
+                   f"Android on it needs about {RAM_NVIDIA_EXTRA_MB} MB more RAM.")
     elif gpu_mod.NVIDIA_SKIPPED in reason:
         # Said first and in full: the operator sees an NVIDIA card in the machine and would
         # otherwise read these figures as that card's.
         out.append(f"The figures are for {mode} mode, because that is what an Android started now would get "
                    f"({reason}). Once NVIDIA mode works, each Android needs about {RAM_NVIDIA_EXTRA_MB} MB more "
                    "RAM and video memory becomes a limit too.")
+    if est.get("mix"):
+        parts = [f"{share['count']} on {share['label']}" for share in est["mix"]]
+        on_cpu = sum(share["count"] for share in est["mix"] if share["mode"] == "software")
+        out.append("Balanced mode shares them: " + ", ".join(parts) + "."
+                   + (f" The {on_cpu} on the CPU cost the most: {CPU_PERCENT['software'][est['workload']]}% of a thread "
+                      f"each in this workload, against {CPU_PERCENT['intel'][est['workload']]} to "
+                      f"{CPU_PERCENT['nvidia'][est['workload']]} on a card." if on_cpu else ""))
+    if binding == "cards":
+        out.append("Every card is full and gpu.balance.overflow is `refuse`: set it to `software` to let further "
+                   "Androids draw on the CPU, or raise gpu.balance.per_dgpu / per_igpu if the cards have room.")
     if binding == "ram":
         if not config.performance.trim_packages:
             gain = _gain(limits["ram"], per_ram, per_ram - RAM_TRIM_SAVING_MB)
@@ -288,8 +383,11 @@ def _advice(config: Config, gpus: list[GpuInfo], est: dict) -> list[str]:
                        "stay off the fast cores. Not benchmarked.")
     if binding == "vram":
         out.append(f"Video memory is the limit: about {VRAM_PER_ANDROID_MB} MB per Android (one measurement, "
-                   "480x854, idle app). Watch `nvidia-smi` with a few Androids running; a second card, or "
-                   "putting part of the fleet on the integrated GPU, raises it.")
+                   "480x854, idle app). Watch `nvidia-smi` with a few Androids running. A second card raises it, and "
+                   "so does gpu.mode `balanced`, which puts what the card cannot hold on the other GPUs and the CPU."
+                   + ("" if config.gpu.vram_reserve_mb == 0 else
+                      f" {config.gpu.vram_reserve_mb} MB per card is kept for a desktop session "
+                      "(gpu.vram_reserve_mb); a headless server can set it to 0."))
     if mode == "nvidia":
         out.append("NVIDIA mode saves CPU, not power: 13 Androids on the NVIDIA card drew about what 9 drew "
                    "in software mode. The integrated GPU was the cheapest per Android.")

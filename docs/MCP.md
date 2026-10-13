@@ -434,7 +434,7 @@ Create new Androids (they are not started). The Android version can only be chos
 | `count` | integer | no | How many. Default 1. |
 | `name` | string | no | Name for the new Android(s). |
 | `android_version` | string | no | Android release, e.g. `13`. Default: the farm's default version. |
-| `gpu_mode` | one of `auto`, `software`, `igpu`, `dgpu`, `intel`, `amd`, `nvidia` | no | Rendering: auto (best available), software (CPU only), igpu, dgpu, or a vendor. |
+| `gpu_mode` | one of `auto`, `balanced`, `software`, `igpu`, `dgpu`, `intel`, `amd`, `nvidia` | no | Rendering: auto (best available), balanced (shared across every GPU, then the CPU), software (CPU only), igpu, dgpu, or a vendor. |
 | `cpus` | number | no | CPU cores this Android may use. |
 | `memory_mb` | integer | no | RAM limit in MiB. |
 | `network_mode` | one of `direct`, `vpn`, `gateway`, `proxy`, `none` | no | direct: the host's connection. vpn: its own tunnel. gateway: a shared VPN gateway. proxy: an HTTP proxy. none: no network. |
@@ -489,7 +489,7 @@ Change settings of one Android: rendering mode, CPU and memory, network mode, VP
 | --- | --- | --- | --- |
 | `id` | integer | yes | The id of one Android (see list_androids). |
 | `name` | string | no | New name. |
-| `gpu_mode` | one of `auto`, `software`, `igpu`, `dgpu`, `intel`, `amd`, `nvidia` | no | Rendering: auto (best available), software (CPU only), igpu, dgpu, or a vendor. |
+| `gpu_mode` | one of `auto`, `balanced`, `software`, `igpu`, `dgpu`, `intel`, `amd`, `nvidia` | no | Rendering: auto (best available), balanced (shared across every GPU, then the CPU), software (CPU only), igpu, dgpu, or a vendor. |
 | `cpus` | number | no | CPU cores this Android may use. |
 | `memory_mb` | integer | no | RAM limit in MiB. |
 | `network_mode` | one of `direct`, `vpn`, `gateway`, `proxy`, `none` | no | direct: the host's connection. vpn: its own tunnel. gateway: a shared VPN gateway. proxy: an HTTP proxy. none: no network. |

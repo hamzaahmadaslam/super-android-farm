@@ -695,14 +695,46 @@ export default {
    "title": "GatewayConfig",
    "type": "object"
   },
+  "GpuBalanceConfig": {
+   "additionalProperties": false,
+   "properties": {
+    "per_igpu": {
+     "default": 0,
+     "description": "balanced mode: the most Androids one integrated GPU takes. 0 = no limit of its own.",
+     "minimum": 0,
+     "title": "Per Igpu",
+     "type": "integer"
+    },
+    "per_dgpu": {
+     "default": 0,
+     "description": "balanced mode: the most Androids one discrete card takes. 0 = worked out from the card's video memory where that is known, else no limit.",
+     "minimum": 0,
+     "title": "Per Dgpu",
+     "type": "integer"
+    },
+    "overflow": {
+     "default": "software",
+     "description": "balanced mode, once every card is full: software draws further Androids on the CPU, refuse fails their start instead.",
+     "enum": [
+      "software",
+      "refuse"
+     ],
+     "title": "Overflow",
+     "type": "string"
+    }
+   },
+   "title": "GpuBalanceConfig",
+   "type": "object"
+  },
   "GpuConfig": {
    "additionalProperties": false,
    "properties": {
     "mode": {
      "default": "auto",
-     "description": "How Androids draw (default for the farm; each Android can override it). auto: best available. software: CPU only. igpu: the integrated GPU. dgpu: a discrete card of any vendor. intel / amd: that vendor's GPU through Mesa. nvidia: Vulkan relayed to the card (needs the Venus runtime).",
+     "description": "How Androids draw (default for the farm; each Android can override it). auto: best available. balanced: shared across every usable GPU, emptiest first, then the CPU. software: CPU only. igpu: the integrated GPU. dgpu: a discrete card of any vendor. intel / amd: that vendor's GPU through Mesa. nvidia: Vulkan relayed to the card (needs the Venus runtime).",
      "enum": [
       "auto",
+      "balanced",
       "software",
       "igpu",
       "dgpu",
@@ -725,7 +757,7 @@ export default {
     },
     "render_node": {
      "default": "",
-     "description": "Force one /dev/dri/renderD* node for intel/amd/nvidia. Empty = detect by driver.",
+     "description": "Force one card for intel/amd/nvidia: a /dev/dri/renderD* node, or the card's PCI address (0000:01:00.0), which stays the same when the node numbers change between boots. Empty = detect by driver.",
      "title": "Render Node",
      "type": "string"
     },
@@ -739,6 +771,16 @@ export default {
      ],
      "title": "Assignment",
      "type": "string"
+    },
+    "vram_reserve_mb": {
+     "default": 1536,
+     "description": "Video memory of each discrete card that is left to everything else when Androids are counted. A desktop session holds about the default; set 0 on a headless server.",
+     "minimum": 0,
+     "title": "Vram Reserve Mb",
+     "type": "integer"
+    },
+    "balance": {
+     "$ref": "#/$defs/GpuBalanceConfig"
     },
     "clear_shader_cache_on_change": {
      "default": true,
@@ -1107,6 +1149,12 @@ export default {
      "default": false,
      "description": "Verbose driver logging inside Android (mesa.log.level=debug). Costs CPU; leave off.",
      "title": "Debug",
+     "type": "boolean"
+    },
+    "isolate_cards": {
+     "default": true,
+     "description": "On a machine with several NVIDIA cards: start each card's relay so that it offers that card only (through the Mesa device-select layer on the host). Without it every relay offers all cards and Androids draw on the first. No effect with one card.",
+     "title": "Isolate Cards",
      "type": "boolean"
     }
    },

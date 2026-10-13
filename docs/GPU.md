@@ -1,6 +1,6 @@
 # GPU
 
-For anyone choosing how Androids draw: on the CPU, on an integrated or discrete GPU, or on an NVIDIA card through the relay.
+For anyone choosing how Androids draw: on the CPU, on an integrated or discrete GPU, on an NVIDIA card through the relay, or shared across all of them.
 
 The rendering mode is the biggest lever on CPU load after the number of Androids. The numbers in the measured sections come from one test machine; [Scaling](SCALING.md) shows how they feed the capacity estimate.
 
@@ -9,17 +9,18 @@ The rendering mode is the biggest lever on CPU load after the number of Androids
 | Mode | What it does |
 | --- | --- |
 | `auto` | The best mode that works now. Never fails: with no usable GPU it draws on the CPU. |
+| `balanced` | Shares the farm across every usable card, the emptiest first, and puts what the cards cannot hold on the CPU. For machines with several GPUs. See [Several GPUs](#several-gpus). |
 | `software` | Draws on the CPU (ANGLE with SwiftShader). Always works. |
 | `igpu` | The integrated GPU, whoever made it. |
 | `dgpu` | A discrete card, whoever made it. |
 | `intel` | An Intel GPU, through Mesa. |
 | `amd` | An AMD GPU, through Mesa. |
 | `nvidia` | An NVIDIA card, through the Venus relay. Needs the NVIDIA runtime to be built. |
-| exact card | A mode plus a pinned render node such as `/dev/dri/renderD129` (`gpu_node` per Android, `gpu.render_node` for the farm). The card must be one the mode allows. |
+| exact card | A mode plus a pinned card: a render node such as `/dev/dri/renderD129`, or the card's PCI address such as `0000:01:00.0` (`gpu_node` per Android, `gpu.render_node` for the farm). The card must be one the mode allows. |
 
 Intel and AMD cards work out of the box. Android's graphics stack is Mesa, Mesa has drivers for those cards, and the Android container gets the card's render node. NVIDIA's proprietary driver is not Mesa, so NVIDIA Androids use a different path, described [below](#nvidia-through-the-relay).
 
-A mode you name must work, or the start of that Android fails with a message that says what is missing and lists the choices your machine does offer. `auto` falls back instead.
+A mode you name must work, or the start of that Android fails with a message that says what is missing and lists the choices your machine does offer. `auto` and `balanced` fall back instead.
 
 ## How auto chooses
 
@@ -71,6 +72,7 @@ For one Android or a selection, and in bulk:
 ```bash
 sf gpu set 1-8 igpu                                  # a selection
 sf gpu set 9 nvidia --node /dev/dri/renderD129       # pin one card
+sf gpu set 9 nvidia --node 0000:01:00.0              # the same card by PCI address
 sf gpu set 9 default                                  # follow gpu.mode again
 sf gpu set 9 nvidia --node ""                         # unpin the card
 sf set 3 gpu_mode=intel                               # the same through the general per-Android command
@@ -84,8 +86,11 @@ A change reaches an Android at its next restart. When the renderer changes, the 
 | --- | --- | --- |
 | `gpu.mode` | `auto` | Farm default mode. |
 | `gpu.prefer` | `dgpu` | Which kind `auto` tries first. |
-| `gpu.render_node` | empty | Force one `/dev/dri/renderD*` for intel, amd or nvidia. Empty detects by driver. |
-| `gpu.assignment` | `round-robin` | Which card a new Android gets when several fit. |
+| `gpu.render_node` | empty | Force one card for intel, amd or nvidia: a `/dev/dri/renderD*` node or a PCI address. Empty detects by driver. |
+| `gpu.assignment` | `round-robin` | Which card a new Android gets when several fit one mode. |
+| `gpu.balance.per_igpu`, `per_dgpu` | `0` | `balanced`: the most Androids one integrated GPU or one discrete card takes. `0` works it out, see below. |
+| `gpu.balance.overflow` | `software` | `balanced`, once every card is full: `software` draws on the CPU, `refuse` fails the start. |
+| `gpu.vram_reserve_mb` | `1536` | Video memory of each discrete card left to everything else. Set `0` on a headless server. |
 | `gpu.clear_shader_cache_on_change` | `true` | Clear shader caches when the renderer changes. |
 | `gpu.nvidia.*` | | Runtime and relay locations, see below. |
 
@@ -93,15 +98,39 @@ The reference for every `gpu.*` setting is [Configuration reference](CONFIGURATI
 
 ## Several GPUs
 
-When more than one usable card fits the chosen mode, `gpu.assignment` picks:
+There are two ways to use more than one card.
+
+**One mode, several cards that fit it.** With `nvidia`, `dgpu`, `amd` or `auto`, only the cards of that kind are used and `gpu.assignment` picks among them:
 
 - `round-robin` (default): by Android id, so Android N lands on card `N mod number-of-cards` and keeps it across restarts.
 - `first`: always the first card in node order.
 - `least-instances`: the card with the fewest running Androids.
 
-To put particular Androids on particular cards, pin them: `sf gpu set 9 nvidia --node /dev/dri/renderD129`, or use the exact-card entries in the panel's Rendering picker. A mode and a node that do not match (for example `igpu` with the NVIDIA node) fail with a message naming the card and why it cannot serve that mode.
+**`balanced`: every card, then the CPU.** `sf config set gpu.mode balanced` shares the farm across the integrated GPU, every discrete card of any vendor, and the CPU:
 
-The NVIDIA relay is one process per card, shared by every Android on that card.
+1. Each discrete card takes as many Androids as its video memory holds: `(memory - gpu.vram_reserve_mb) / 360 MB`, the measured figure per Android at 480x854. A 24 GB card on a headless server takes 68, a 4 GB card 11, a 2 GB card under a desktop one. `gpu.balance.per_dgpu` replaces the figure with yours.
+2. An integrated GPU has no limit of its own, because it draws from system RAM. The memory it reports is a reservation made by the firmware, not a ceiling. `gpu.balance.per_igpu` gives it one.
+3. A new Android goes to the emptiest card, measured as running Androids against what the card takes. A large card therefore gets proportionally more than a small one, and equal cards get equal shares. A card with no limit is measured against the largest limit among the others. `gpu.prefer` breaks a tie.
+4. An Android keeps the card it used last while that card has room, so a restart does not rebuild its container.
+5. When every card is full, further Androids draw on the CPU (`gpu.balance.overflow: software`, the default) or their start fails with the reason (`refuse`).
+6. A card that cannot be used now is passed over with the reason shown: an NVIDIA card whose runtime is not built, or whose relay does not start.
+
+`sf host capacity` counts a balanced farm Android by Android and prints who gets what, for example "39 on NVIDIA card A, 39 on NVIDIA card B, 24 on the CPU". An Android on the CPU costs more than twice the CPU of one on a card, so the estimate shows how many of those the processor can carry.
+
+To put particular Androids on particular cards, pin them: `sf gpu set 9 nvidia --node 0000:81:00.0`, or use the exact-card entries in the panel's Rendering picker. A mode and a card that do not match (for example `igpu` with the NVIDIA card) fail with a message naming the card and why it cannot serve that mode.
+
+**Pin by PCI address on a machine with several cards.** The kernel hands out `renderD128`, `renderD129` and so on in the order the drivers load, and that order can differ from one boot to the next. A PCI address names the same slot every time. `sf host gpus` prints both. The `/dev/dri/by-path/pci-…-render` links that udev creates are accepted too.
+
+**Several NVIDIA cards.** The relay is one process per card, shared by every Android on that card. Its `--rendernode` option does not choose the Vulkan device: the relay offers Android every device the host's Vulkan loader lists, and Android takes the first. With two or more NVIDIA cards the farm therefore starts each relay limited to its own card, through Mesa's device-select layer on the host (`DRI_PRIME=pci-…!`). That layer comes with the distribution's Mesa Vulkan packages, and the "GPUs" row of `sf doctor` says whether it is installed. `gpu.nvidia.isolate_cards: false` switches this off. On a machine with one NVIDIA card nothing is set. This has not run on a machine with two NVIDIA cards, see [Not verified](#not-verified).
+
+## Servers
+
+A server differs from the desktop the numbers were measured on in four ways the farm knows about:
+
+- **No desktop holds video memory.** Set `gpu.vram_reserve_mb: 0`, or the estimate and `balanced` keep 1.5 GB of every discrete card free for a session that is not there.
+- **No login session grants access to the cards.** On a desktop the logged-in user reaches `/dev/dri/renderD*` through the session. Over SSH, and in a user service that keeps running after logout, that grant is absent. Intel and AMD cards are not affected, because Docker passes the node to the container itself. The NVIDIA relay opens the card as your user, so your user must be in the group that owns it: `sudo usermod -aG render $USER`. `sf doctor` warns in its "Render node permissions" row when access rests on the session alone, and `sf host apply` adds the group.
+- **Devices that are not GPUs.** A management controller's display (ASPEED, Matrox) has no render node and is never listed. A virtual GPU inside a virtual machine has one, is listed by `sf host gpus` as unusable, and is never chosen.
+- **No display or sound.** Native device windows and listening on the host's speakers need a desktop session. `sf doctor` skips that row on a machine with no desktop installed. The panel, live views and everything else work, reached through an SSH tunnel to the panel's port ([FAQ](FAQ.md)).
 
 ## NVIDIA through the relay
 
@@ -123,6 +152,7 @@ NVIDIA settings (the first two are not changeable through the API):
 | `gpu.nvidia.icd` | `/usr/share/vulkan/icd.d/nvidia_icd.json` | The NVIDIA Vulkan driver manifest on the host. API-immutable. |
 | `gpu.nvidia.socket_dir` | `/run/superfarm/venus` | One socket folder per card. |
 | `gpu.nvidia.debug` | `false` | Verbose driver logging inside Android. Costs CPU. |
+| `gpu.nvidia.isolate_cards` | `true` | With several NVIDIA cards: limit each relay to its own card. No effect with one card. |
 
 ## Measured numbers
 
@@ -159,7 +189,9 @@ With the default settings the capacity estimate on the test machine is about 33 
 - NVIDIA on Android versions other than 13, and 32-bit apps on NVIDIA.
 - Hardware video decoding on the card. Video is decoded on the CPU.
 - Only one card model and one driver series (an RTX 40-series card, NVIDIA open kernel module 595) were tested.
-- Intel Arc and multi-card machines. The assignment rules are unit-tested, and the test machine has one card of each vendor.
+- Intel Arc and multi-card machines. The assignment rules and `balanced` are unit-tested against described machines (four equal cards, a large and a small card, cards in other PCI domains), and the test machine has one card of each vendor. On it, `balanced` was run live across the integrated GPU and the CPU only, see [Verification](VERIFICATION.md).
+- Two or more NVIDIA cards. Limiting each relay to its card relies on Mesa's device-select layer wrapping NVIDIA's driver; neither that nor NVIDIA's behaviour without a display server on several cards was tried.
+- A headless server. The server rules above come from how the kernel, udev and the drivers are documented to behave, not from a run on one.
 
 ## Next
 

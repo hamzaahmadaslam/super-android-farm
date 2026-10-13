@@ -51,7 +51,7 @@ Settings under `android`, `resources`, `gpu`, `network` and `device` reach an An
 | Doctor: `Android binder` fails with "this kernel has no binder support" | Your kernel was built without binder. | Debian and Ubuntu releases that split it out: `sudo apt-get install -y linux-modules-extra-$(uname -r)`<br>Arch: `sudo pacman -S linux-zen linux-zen-headers`, then reboot into it<br>Otherwise boot a kernel built with `CONFIG_ANDROID_BINDER_IPC` and `CONFIG_ANDROID_BINDERFS` |
 | Doctor: `Android binder` warns "binderfs is not registered" | | `sudo mkdir -p /dev/binderfs && sudo mount -t binder binder /dev/binderfs` |
 | Doctor: `Container networking` or `Netfilter` fails with "installed but not loaded" | Module auto-loading is off on this host. | `sf host apply` |
-| Doctor: `Kernel module auto-loading` warns | `cat /proc/sys/kernel/modprobe` prints nothing. | `sf host apply` |
+| Doctor: `Kernel module auto-loading` warns | `cat /proc/sys/kernel/modprobe` prints nothing. It was seen to become empty after Androids were started ([Design notes](DESIGN_NOTES.md#kernel-module-auto-loading-was-off)). | `sf host apply` makes the farm independent of it. `sudo sysctl -w kernel.modprobe=/sbin/modprobe` restores loading on demand until the next change. |
 | Doctor: `IP forwarding` fails | | `sudo sysctl -w net.ipv4.ip_forward=1`<br>`sf host apply` |
 | Doctor: `Docker installed` fails | | The doctor prints the install command for your distribution. |
 | Doctor: `Docker daemon` fails | `systemctl status docker` | `sudo systemctl enable --now docker.service` |
